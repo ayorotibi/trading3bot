@@ -1,19 +1,12 @@
 # Render Blueprint: Render dashboard -> New -> Blueprint -> pick this repo.
-# Creates two services that share one group of secrets:
+# Creates two services:
 #   1. trading-bot (cron job): runs every 5 minutes, Mon-Fri, 13:00-21:55 UTC.
 #      That window covers US market hours in summer (EDT) and winter (EST);
 #      the bot checks Alpaca's market clock and exits at once when closed or on holidays.
 #   2. trade-log (free web service): password-protected page listing the bot's trades.
 #
-# IMPORTANT: Render can't prompt for secrets inside an environment group. After the
-# Blueprint is created, open Environment Groups -> trading-secrets in the Render
-# dashboard and add ALPACA_API_KEY and ALPACA_SECRET_KEY there yourself.
-envVarGroups:
-  - name: trading-secrets
-    envVars:
-      - key: ALPACA_PAPER
-        value: "true"
-
+# Render asks for every "sync: false" value when the Blueprint is first created.
+# The Alpaca keys are asked for twice (once per service): enter the same keys both times.
 services:
   - type: cron
     name: trading-bot
@@ -23,11 +16,12 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python -m bot.main
     envVars:
-      - fromGroup: trading-secrets
-      - key: PYTHON_VERSION
-        value: "3.12.7"
-      - key: DRY_RUN
-        value: "false"
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_PAPER
+        value: "true"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
@@ -36,6 +30,10 @@ services:
         sync: false
       - key: QUIVER_API_TOKEN
         sync: false
+      - key: DRY_RUN
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.12.7"
 
   - type: web
     name: trade-log
@@ -45,10 +43,15 @@ services:
     startCommand: python -m bot.dashboard
     healthCheckPath: /healthz
     envVars:
-      - fromGroup: trading-secrets
-      - key: PYTHON_VERSION
-        value: "3.12.7"
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_PAPER
+        value: "true"
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: DASHBOARD_TIMEZONE
         value: Europe/London
+      - key: PYTHON_VERSION
+        value: "3.12.7"

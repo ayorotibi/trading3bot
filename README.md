@@ -55,10 +55,14 @@ There is no database. The bot works out its state from your Alpaca positions and
 1. In Render: **New → Blueprint**, connect GitHub and pick this repo. Render reads `render.yaml` and creates:
    - `trading-bot`: a cron job (Starter plan; billed by the second it runs, minimum $1/month)
    - `trade-log`: the trade log page (free plan; it sleeps when idle, so the first visit takes ~30 seconds to wake)
-2. Render asks for the secret values. Fill in your Telegram/Discord values and a strong `DASHBOARD_PASSWORD`. Leave `QUIVER_API_TOKEN` blank unless you use Quiver.
-3. Click **Apply**.
-4. **Add your Alpaca keys by hand** (Render can't prompt for secrets inside an environment group): **Environment Groups → trading-secrets → Edit → Add Environment Variable**, add `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`, and save. Both services share this group.
-5. Open the `trade-log` service URL, enter any username plus your `DASHBOARD_PASSWORD`.
+2. Render asks for the secret values. Fill in:
+   - `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` — asked for **twice** (once per service); enter the same paper keys both times
+   - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (and/or `DISCORD_WEBHOOK_URL`)
+   - `DASHBOARD_PASSWORD` — make one up, 8+ characters
+   - Leave `QUIVER_API_TOKEN` blank unless you use Quiver.
+3. Click **Apply**, then open the `trade-log` service URL and log in with any username plus your `DASHBOARD_PASSWORD`.
+
+Render only asks for these values when the Blueprint is first created. To change one later, open the service → **Environment**, edit it, and save (and change the Alpaca keys on both services).
 
 To test without waiting for the schedule: `trading-bot` → **Trigger Run**, then watch **Logs**.
 
@@ -108,7 +112,7 @@ Turn either strategy off with `enabled: false`.
 Only after a long paper trial:
 
 1. Generate **live** API keys in Alpaca and replace the paper ones on Render.
-2. Set `ALPACA_PAPER=false` in the `trading-secrets` group.
+2. Set `ALPACA_PAPER=false` on both services (each service → **Environment**).
 3. Add `LIVE_TRADING_CONFIRM` = `I-UNDERSTAND-THIS-USES-REAL-MONEY` to the `trading-bot` service.
 
 Without step 3 the bot refuses to start in live mode. The trade log page shows a red **LIVE** badge.
