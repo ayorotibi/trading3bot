@@ -1,0 +1,51 @@
+# Strategy settings. Secrets (API keys) never go here: they are environment
+# variables (see .env.example). Edit this file, commit, and Render redeploys.
+
+data:
+  options_feed: indicative   # free Alpaca accounts; use "opra" if you pay for real-time options data
+  stock_feed: iex            # free; use "sip" with a paid data plan
+
+# ---------------------------------------------------------------------------
+# The wheel: sell cash-secured puts -> if assigned, sell covered calls -> repeat
+# ---------------------------------------------------------------------------
+wheel:
+  enabled: true
+  # Stocks you'd be happy to own. Each put contract needs strike x 100 in cash,
+  # e.g. a $12 put secures $1,200.
+  symbols: [F, SOFI, BAC]
+  contracts_per_symbol: 1
+
+  target_dte: 30          # aim for expiries about 30 days out...
+  min_dte: 21             # ...but only between 21
+  max_dte: 45             # and 45 days
+  put_target_delta: 0.30  # ~30% chance of finishing in the money (being assigned)
+  call_target_delta: 0.30
+  otm_pct_if_no_delta: 0.05  # fallback when the data feed has no greeks: 5% out of the money
+
+  min_premium: 0.10       # ignore contracts paying less than $0.10/share ($10/contract)
+  max_spread_pct: 0.30    # skip illiquid contracts with wide bid/ask spreads
+  take_profit_pct: 0.50   # buy back early once 50% of the premium is captured (0 = hold to expiry)
+  calls_never_below_cost_basis: true  # never sell a call that would lock in a loss on assignment
+  max_cash_pct: 0.50      # at most 50% of account equity tied up securing puts
+  reprice_after_minutes: 30  # cancel and re-price unfilled orders after this long
+
+# ---------------------------------------------------------------------------
+# Politician copy trading
+# ---------------------------------------------------------------------------
+copy_trading:
+  enabled: true
+  source: capitol_trades   # free, scraped from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
+  politicians:
+    - name: Michael McCaul         # used for matching on Quiver
+      capitol_trades_id: M001157   # the ID in his capitoltrades.com/politicians/... URL
+    # - name: Nancy Pelosi
+    #   capitol_trades_id: P000197
+
+  amount_per_trade_usd: 500   # dollars per copied buy
+  lookback_days: 7            # only act on disclosures published in the last 7 days
+  max_trade_age_days: 60      # ignore trades the politician made more than 60 days ago
+  mirror_sells: true          # when they disclose a sale, sell your whole position in that stock
+  max_open_positions: 20
+  skip_if_already_held: false # true = don't add to a stock you already own
+  check_every_minutes: 30     # disclosures change slowly; no need to check every 5 minutes
+  capitol_trades_pages: 1
