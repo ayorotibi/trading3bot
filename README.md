@@ -55,8 +55,10 @@ There is no database. The bot works out its state from your Alpaca positions and
 1. In Render: **New → Blueprint**, connect GitHub and pick this repo. Render reads `render.yaml` and creates:
    - `trading-bot`: a cron job (Starter plan; billed by the second it runs, minimum $1/month)
    - `trade-log`: the trade log page (free plan; it sleeps when idle, so the first visit takes ~30 seconds to wake)
-2. Render asks for the secret values. Fill in `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, your Telegram/Discord values, and a strong `DASHBOARD_PASSWORD`. Leave `QUIVER_API_TOKEN` blank unless you use Quiver.
-3. Click **Apply**. Open the `trade-log` service URL, enter any username plus your `DASHBOARD_PASSWORD`.
+2. Render asks for the secret values. Fill in your Telegram/Discord values and a strong `DASHBOARD_PASSWORD`. Leave `QUIVER_API_TOKEN` blank unless you use Quiver.
+3. Click **Apply**.
+4. **Add your Alpaca keys by hand** (Render can't prompt for secrets inside an environment group): **Environment Groups → trading-secrets → Edit → Add Environment Variable**, add `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`, and save. Both services share this group.
+5. Open the `trade-log` service URL, enter any username plus your `DASHBOARD_PASSWORD`.
 
 To test without waiting for the schedule: `trading-bot` → **Trigger Run**, then watch **Logs**.
 
