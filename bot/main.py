@@ -38,7 +38,6 @@ def load_config(path: str) -> dict:
 
 def build(config: dict, dry_run: bool):
     from .broker import AlpacaBroker
-    from .sources.capitol_trades import CapitolTradesSource
     from .sources.quiver import QuiverSource
     from .strategies.congress import CongressStrategy
     from .strategies.wheel import WheelStrategy
@@ -73,11 +72,7 @@ def build(config: dict, dry_run: bool):
         if congress_cfg.get("source", "capitol_trades") == "quiver":
             source = QuiverSource()
         else:
-            source = CapitolTradesSource(
-                lookback_days=int(congress_cfg.get("lookback_days", 30)),
-                max_trade_age_days=int(congress_cfg.get("max_trade_age_days", 90)),
-                max_pages=int(congress_cfg.get("capitol_trades_max_pages", 60)),
-            )
+            source = make_capitol_source(congress_cfg)
         # Runs first, so on rebalance days the wheel sees today's picks.
         strategies.append(CongressStrategy(broker, congress_cfg, notifier, source))
 
@@ -110,23 +105,60 @@ def run_once(config: dict, dry_run: bool, force: bool) -> None:
             notifier.send(f"❌ {strat.name} failed: {type(exc).__name__}: {exc}")
 
 
+def make_capitol_source(cfg: dict):
+    from .sources.capitol_trades import CapitolTradesSource
+
+    history = int(cfg.get("history_days", 365)) if cfg.get("use_track_records", True) else int(cfg.get("lookback_days", 30))
+    return CapitolTradesSource(
+        lookback_days=history,
+        max_trade_age_days=max(history, int(cfg.get("max_trade_age_days", 90))),
+        max_pages=int(cfg.get("capitol_trades_max_pages", 200)),
+    )
+
+
 def show_picks(config: dict) -> None:
-    """Print the ranking straight from the data source; needs no Alpaca keys."""
+    """Print politicians' track records and the stock ranking. Trades nothing.
+
+    Uses Alpaca keys (from .env) for price history if present; without them the
+    ranking is shown without track-record weighting.
+    """
     from datetime import date
 
-    from .sources.capitol_trades import CapitolTradesSource
     from .sources.quiver import QuiverSource
     from .strategies.congress import DEFAULTS, rank
+    from .strategies.politicians import DEFAULTS as TRACK_DEFAULTS
+    from .strategies.politicians import PriceHistory, top_traders, track_records
 
     cfg = {**DEFAULTS, **config.get("congress", {})}
-    source = QuiverSource() if cfg["source"] == "quiver" else CapitolTradesSource(
-        lookback_days=int(cfg["lookback_days"]), max_trade_age_days=int(cfg["max_trade_age_days"]),
-        max_pages=int(cfg["capitol_trades_max_pages"]))
+    source = QuiverSource() if cfg["source"] == "quiver" else make_capitol_source(cfg)
     today = date.today()
-    picks = rank(source.fetch(today), today, int(cfg["lookback_days"]), int(cfg["max_trade_age_days"]),
-                 set(cfg["exclude"]))
+    disclosures = source.fetch(today)
+    print(f"Read {len(disclosures)} disclosures")
+
+    weights = {}
+    if cfg["use_track_records"] and os.getenv("ALPACA_API_KEY"):
+        from datetime import timedelta
+
+        from .broker import AlpacaBroker
+
+        broker = AlpacaBroker(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], dry_run=True,
+                              stock_feed=config.get("data", {}).get("stock_feed", "iex"))
+        tickers = sorted({d.ticker for d in disclosures if d.side == "buy"} | {"SPY"})
+        closes = broker.daily_closes(tickers, today - timedelta(days=int(cfg["history_days"]) + 10))
+        records = track_records(disclosures, PriceHistory(closes), today,
+                                {**TRACK_DEFAULTS, **(cfg.get("track_record") or {})})
+        weights = {n: r.weight for n, r in records.items()}
+        print("\nTop traders (buys vs S&P 500 from the disclosure date):")
+        for r in top_traders(records, n=15):
+            print(f"  {r.politician:<28} {r.avg_excess:+7.1%}  beat S&P {r.hit_rate:4.0%} of {r.scored_trades:>3} buys"
+                  f"  active trades {r.recent_trades:>3}  weight {r.weight:g}x")
+    else:
+        print("(no Alpaca keys found: ranking without track records)")
+
+    picks = rank(disclosures, today, int(cfg["lookback_days"]), int(cfg["max_trade_age_days"]),
+                 set(cfg["exclude"]), weights)
     picks = [p for p in picks if p.score > 0 and len(p.buyers) >= int(cfg["min_buyers"])]
-    print(f"{'#':>3}  {'Ticker':<7} {'Score':>6}  Buyers  Sellers  Who's buying")
+    print(f"\n{'#':>3}  {'Ticker':<7} {'Score':>6}  Buyers  Sellers  Who's buying")
     for i, p in enumerate(picks[:30], 1):
         print(f"{i:>3}  {p.ticker:<7} {p.score:>6.1f}  {len(p.buyers):>6}  {len(p.sellers):>7}  {', '.join(p.buyers[:5])}")
     if not picks:
@@ -134,7 +166,7 @@ def show_picks(config: dict) -> None:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Alpaca wheel + congress follow-the-crowd bot")
+    parser = argparse.ArgumentParser(description="Alpaca wheel bot, choosing stocks from congressional trades")
     parser.add_argument("--config", default=os.getenv("BOT_CONFIG", "config.yaml"))
     parser.add_argument("--dry-run", action="store_true", help="log orders instead of placing them")
     parser.add_argument("--force", action="store_true", help="run even when the market is closed")

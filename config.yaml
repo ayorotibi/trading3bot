@@ -6,31 +6,47 @@ data:
   stock_feed: iex            # free; use "sip" with a paid data plan
 
 # ---------------------------------------------------------------------------
-# Congress: buy the stocks members of Congress are buying (all of them)
+# Congress picks: chooses WHICH stocks the wheel trades
 # ---------------------------------------------------------------------------
+# Every trading day (first run after the market opens) the bot reads a year of
+# all politicians' disclosed trades, scores each politician on how their buys
+# did vs the S&P 500, then ranks stocks they bought in the last 30 days,
+# giving more weight to politicians with a good track record.
 congress:
   enabled: true
   source: capitol_trades     # free, read from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
 
-  lookback_days: 30          # count disclosures published in the last 30 days
-  max_trade_age_days: 90     # ignore trades the politician made more than 90 days ago
+  lookback_days: 30          # stocks bought (disclosed) in the last 30 days are candidates
+  max_trade_age_days: 90     # ignore trades the politician made more than 90 days ago (late filings)
   min_buyers: 2              # a stock needs at least 2 different politicians buying it
-  top_n: 10                  # hold the 10 best-scoring stocks...
-  budget_pct: 0.30           # ...using 30% of account equity, split equally (3% each)
-  hold_rank: 15              # keep a holding while it ranks in the top 15 (stops daily churn)
   min_price: 5.0             # skip penny stocks
-  exclude: []                # tickers never to buy, e.g. [TSLA, GME]
-  rebalance_time_utc: "15:00"  # once a day: 15:00 UTC = 15:00 UK winter time, 16:00 UK summer time
-  capitol_trades_max_pages: 60
+  exclude: []                # tickers never to pick, e.g. [TSLA, GME]
+
+  use_track_records: true    # weight politicians by how well their past buys did
+  history_days: 365          # how much history to judge them on
+  track_record:
+    horizon_days: 90         # judge each buy on the 90 days after it was disclosed
+    min_scored_trades: 5     # fewer judged buys than this = neutral weight (1.0)
+    min_weight: 0.25         # worst traders count a quarter as much...
+    max_weight: 3.0          # ...best traders up to 3x
+
+  # Optional: also buy the top stocks outright. Off: the wheel does the trading.
+  buy_stocks: false
+  top_n: 10
+  budget_pct: 0.30
+  hold_rank: 15
 
 # ---------------------------------------------------------------------------
-# The wheel: sell cash-secured puts -> if assigned, sell covered calls -> repeat
+# The wheel (main strategy): sell cash-secured puts -> if assigned, sell
+# covered calls -> repeat
 # ---------------------------------------------------------------------------
 wheel:
   enabled: true
-  symbols_from_congress: true  # pick stocks from the congress ranking (best first)
-  max_symbols: 3               # wheel at most 3 stocks at a time
-  max_share_price: 50          # a put on a $50 stock ties up ~$5,000; raise this if you have more cash
+  symbols_from_congress: true  # take stocks from the congress picks, best first
+  max_symbols: 5               # wheel up to 5 stocks at a time
+  # Each stock gets an equal slice of the cash budget (equity x max_cash_pct / max_symbols).
+  # With $100k, 50% and 5 stocks: $10k each, so stocks up to ~$100 a share can be wheeled.
+  # Picks too expensive for their slice, or with illiquid options, are skipped for the next one.
   symbols: [F, SOFI, BAC]      # used before the first congress ranking exists, or if symbols_from_congress is false
   contracts_per_symbol: 1
 
@@ -45,5 +61,5 @@ wheel:
   max_spread_pct: 0.30    # skip illiquid contracts with wide bid/ask spreads
   take_profit_pct: 0.50   # buy back early once 50% of the premium is captured (0 = hold to expiry)
   calls_never_below_cost_basis: true  # never sell a call that would lock in a loss on assignment
-  max_cash_pct: 0.50      # at most 50% of account equity tied up securing puts
+  max_cash_pct: 0.50      # at most 50% of account equity tied up securing puts (raise to use more)
   reprice_after_minutes: 30  # cancel and re-price unfilled orders after this long

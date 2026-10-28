@@ -20,6 +20,8 @@ class FakeBroker:
         self.quotes: dict[str, tuple[float, float]] = {}
         self.assets: dict[str, dict] = {}
         self.picks = None
+        self.picks_date = None
+        self.closes: dict = {}
         self.holdings: dict[str, float] = {}  # shares owned by the congress strategy ("cr-")
 
     # broker API used by strategies
@@ -49,6 +51,13 @@ class FakeBroker:
 
     def save_picks(self, symbols, name="Congress Picks"):
         self.picks = list(symbols)
+        self.picks_date = "saved"
+
+    def picks_updated_on(self, name="Congress Picks"):
+        return self.picks_date
+
+    def daily_closes(self, symbols, start):
+        return {s: v for s, v in self.closes.items() if s in symbols}
 
     def latest_price(self, symbol):
         return self.prices[symbol]

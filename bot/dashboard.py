@@ -166,7 +166,7 @@ a{{color:var(--accent)}} .muted{{color:var(--muted);font-size:13px}}
 <div class="stat"><small>Cash</small><b>{cash}</b></div>
 <div class="stat"><small>Options buying power</small><b>{obp}</b></div>
 </div>
-<h2>Congress picks <span class="muted">· stocks politicians are buying most, best first</span></h2>
+<h2>Congress picks <span class="muted">· the wheel chooses from these, best first</span></h2>
 <div class="picks">{picks}</div>
 <h2>Positions</h2>
 <div class="wrap"><table><tr><th>Holding</th><th>Qty</th><th>Avg price</th><th>Now</th><th>Unrealised P/L</th></tr>{positions}</table></div>

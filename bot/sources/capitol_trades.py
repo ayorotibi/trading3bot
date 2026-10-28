@@ -134,11 +134,22 @@ class CapitolTradesSource:
         cutoff = today - timedelta(days=self.lookback_days)
         results: dict[str, Disclosure] = {}
         session = requests.Session()
+        use_date_filter = True
         for page in range(1, self.max_pages + 1):
-            params = {"txDate": f"{self.max_trade_age_days}d", "pageSize": self.page_size, "page": page}
+            params = {"pageSize": self.page_size, "page": page}
+            if use_date_filter:
+                params["txDate"] = f"{self.max_trade_age_days}d"
             resp = session.get(BASE_URL, params=params, headers=HEADERS, timeout=self.timeout)
             resp.raise_for_status()
             trades = parse_trades_html(resp.text, today)
+            if not trades and page == 1 and use_date_filter:
+                # The site may not accept this date filter; fall back to the unfiltered listing.
+                log.info("Capitol Trades: no rows with txDate filter, retrying without it")
+                use_date_filter = False
+                resp = session.get(BASE_URL, params={k: v for k, v in params.items() if k != "txDate"},
+                                   headers=HEADERS, timeout=self.timeout)
+                resp.raise_for_status()
+                trades = parse_trades_html(resp.text, today)
             if not trades:
                 if page == 1:
                     raise RuntimeError(

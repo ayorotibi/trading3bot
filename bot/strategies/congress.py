@@ -1,25 +1,24 @@
-"""Follow the crowd: trade the stocks members of Congress are buying.
+"""Congress picks: use what members of Congress are buying to choose stocks.
 
-Once a day:
-  1. Read every politician's disclosed buys and sells from the last
-     `lookback_days` (default 30) from Capitol Trades.
-  2. Score each stock. Every different politician buying it adds points
-     (bigger trades add more); every politician selling it takes points away.
-  3. Hold the `top_n` (default 10) best-scoring stocks that at least
-     `min_buyers` different politicians bought, with `budget_pct` of the
-     account split equally between them.
-  4. Sell a holding when it drops below rank `hold_rank`, or more
-     politicians are selling it than buying.
+This is a stock-picker for the wheel, not a trading strategy of its own
+(unless you turn on buy_stocks). Every trading day:
 
-The ranked list is saved to an Alpaca watchlist ("Congress Picks") so the
-wheel strategy can use it on every 5-minute run, and you can see it in the
-Alpaca app.
+  1. Read a year of every politician's disclosed trades from Capitol Trades.
+  2. Build each politician's track record (politicians.py): how their buys
+     did against the S&P 500 from the day they were disclosed. Successful
+     traders get a higher weight, unsuccessful ones a lower weight.
+  3. Score each stock from the last `lookback_days` (default 30): each
+     different politician buying it adds (trade size points x their weight);
+     each politician selling it subtracts the same way.
+  4. Keep stocks with at least `min_buyers` different politicians buying,
+     net buying, tradable on Alpaca, above `min_price`.
+  5. Save the ranked list to an Alpaca watchlist ("Congress Picks"). The
+     wheel reads it on every 5-minute run and wheels the best ones.
 
-Only shares this strategy bought (orders tagged "cr-") are ever sold by it,
-so wheel shares and anything you buy yourself are left alone.
+Optional (buy_stocks: true): also hold the top `top_n` stocks with
+`budget_pct` of the account. Off by default.
 
-Disclosures arrive up to 45 days after the politician traded, so this always
-buys after they did.
+Disclosures arrive up to 45 days after the politician traded.
 """
 from __future__ import annotations
 
@@ -31,6 +30,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from ..models import Disclosure
+from .politicians import DEFAULTS as TRACK_DEFAULTS
+from .politicians import PriceHistory, TrackRecord, top_traders, track_records
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +42,19 @@ DEFAULTS = {
     "source": "capitol_trades",
     "lookback_days": 30,
     "max_trade_age_days": 90,
+    "history_days": 365,
+    "use_track_records": True,
     "min_buyers": 2,
+    "min_price": 5.0,
+    "exclude": [],
+    "keep_picks": 30,
+    "capitol_trades_max_pages": 200,
+    "track_record": {},
+    # optional direct stock buying (off by default: the wheel does the trading)
+    "buy_stocks": False,
     "top_n": 10,
     "hold_rank": 15,
     "budget_pct": 0.30,
-    "min_price": 5.0,
-    "exclude": [],
-    "rebalance_time_utc": "15:00",
-    "capitol_trades_max_pages": 60,
 }
 
 _SIZE_RE = re.compile(r"\$?\s*([\d,.]+)\s*([KkMm])?")
@@ -86,7 +92,7 @@ class Pick:
 
 
 def rank(disclosures: list[Disclosure], today: date, lookback_days: int, max_trade_age_days: int,
-         exclude: Optional[set] = None) -> list[Pick]:
+         exclude: Optional[set] = None, weights: Optional[dict[str, float]] = None) -> list[Pick]:
     exclude = {e.upper() for e in (exclude or set())}
     published_cutoff = today - timedelta(days=lookback_days)
     traded_cutoff = today - timedelta(days=max_trade_age_days)
@@ -103,7 +109,8 @@ def rank(disclosures: list[Disclosure], today: date, lookback_days: int, max_tra
             continue
         book = buys if d.side == "buy" else sells
         per_pol = book.setdefault(t, {})
-        per_pol[d.politician] = max(per_pol.get(d.politician, 0), size_weight(d.size))
+        w = size_weight(d.size) * (weights or {}).get(d.politician, 1.0)
+        per_pol[d.politician] = max(per_pol.get(d.politician, 0), w)
 
     picks = []
     for t in set(buys) | set(sells):
@@ -123,26 +130,67 @@ class CongressStrategy:
         self.source = source
 
     def due(self, now: datetime) -> bool:
-        hh, mm = (int(x) for x in str(self.cfg["rebalance_time_utc"]).split(":"))
-        start = hh * 60 + mm
-        minute = now.hour * 60 + now.minute
-        if start <= minute < start + 5:
+        """Refresh once a day: on the first top-of-the-hour run with yesterday's (or no) picks.
+
+        If the refresh fails it is retried at the next hour, not every 5 minutes.
+        """
+        updated = self.broker.picks_updated_on()
+        if updated is None:
             return True
-        # First ever run (no saved picks yet): don't wait until tomorrow.
-        return self.broker.load_picks() is None
+        return updated < now.date() and now.minute < 5
 
     def run(self, now: Optional[datetime] = None, force: bool = False) -> list[Pick]:
         now = now or datetime.now(timezone.utc)
         if not force and not self.due(now):
-            log.info("Congress: next rebalance at %s UTC", self.cfg["rebalance_time_utc"])
+            log.info("Congress: today's picks are up to date (%s)", (self.broker.load_picks() or [])[:10])
             return []
         today = now.date()
-        picks = rank(self.source.fetch(today), today, int(self.cfg["lookback_days"]),
-                     int(self.cfg["max_trade_age_days"]), set(self.cfg["exclude"]))
+        disclosures = self.source.fetch(today)
+
+        records: dict[str, TrackRecord] = {}
+        if self.cfg["use_track_records"]:
+            records = self._track_records(disclosures, today)
+        weights = {name: r.weight for name, r in records.items()}
+
+        picks = rank(disclosures, today, int(self.cfg["lookback_days"]), int(self.cfg["max_trade_age_days"]),
+                     set(self.cfg["exclude"]), weights)
         qualified = self._qualify(picks)
-        self.broker.save_picks([p.ticker for p in qualified[:30]])
-        self._rebalance(qualified, today)
+        self.broker.save_picks([p.ticker for p in qualified[: int(self.cfg["keep_picks"])]])
+
+        lines = self._rebalance(qualified, today) if self.cfg["buy_stocks"] else []
+        self._summary(qualified, records, lines, today)
         return qualified
+
+    def _track_records(self, disclosures: list[Disclosure], today: date) -> dict[str, TrackRecord]:
+        cfg = {**TRACK_DEFAULTS, **(self.cfg.get("track_record") or {})}
+        start = today - timedelta(days=int(self.cfg["history_days"]) + 10)
+        tickers = sorted({d.ticker for d in disclosures if d.side == "buy"} | {"SPY"})
+        try:
+            closes = self.broker.daily_closes(tickers, start)
+        except Exception as exc:
+            log.warning("Couldn't load price history, ranking without track records: %s", exc)
+            return {}
+        records = track_records(disclosures, PriceHistory(closes), today, cfg)
+        judged = sum(1 for r in records.values() if r.scored_trades >= int(cfg["min_scored_trades"]))
+        log.info("Track records: %d politicians, %d with enough trades to judge", len(records), judged)
+        return records
+
+    def _summary(self, qualified, records, lines, today) -> None:
+        top = "\n".join(
+            f"{i}. {p.ticker}  score {p.score:g}  ({len(p.buyers)} buying, {len(p.sellers)} selling)"
+            for i, p in enumerate(qualified[:10], start=1)
+        ) or "(no stock had enough politicians buying)"
+        traders = "\n".join(
+            f"• {r.politician}: {r.avg_excess:+.1%} vs S&P on avg, beat it {r.hit_rate:.0%} of "
+            f"{r.scored_trades} buys, weight {r.weight:g}x"
+            for r in top_traders(records)
+        )
+        msg = f"🏛️ Congress picks for {today:%d %b} (the wheel picks from these):\n{top}"
+        if traders:
+            msg += f"\n\nTop traders by track record:\n{traders}"
+        if self.cfg["buy_stocks"]:
+            msg += "\n\nStock trades:\n" + ("\n".join(lines) or "No changes today")
+        self.notify.send(msg)
 
     # ------------------------------------------------------------------
     def _qualify(self, picks: list[Pick]) -> list[Pick]:
@@ -161,11 +209,11 @@ class CongressStrategy:
             if price < float(self.cfg["min_price"]):
                 continue
             out.append(p)
-            if len(out) >= max(int(self.cfg["hold_rank"]), 30):
+            if len(out) >= max(int(self.cfg["hold_rank"]), int(self.cfg["keep_picks"])):
                 break
         return out
 
-    def _rebalance(self, qualified: list[Pick], today: date) -> None:
+    def _rebalance(self, qualified: list[Pick], today: date) -> list[str]:
         top_n, hold_rank = int(self.cfg["top_n"]), int(self.cfg["hold_rank"])
         ranks = {p.ticker: i + 1 for i, p in enumerate(qualified)}
         held = {s: q for s, q in self.broker.strategy_holdings(PREFIX).items() if q > 1e-6}
@@ -215,9 +263,4 @@ class CongressStrategy:
             lines.append(f"BUY {amount} {p.ticker} (bought by {len(p.buyers)}: {', '.join(p.buyers[:4])}"
                          f"{'…' if len(p.buyers) > 4 else ''})")
 
-        top = "\n".join(
-            f"{i}. {p.ticker}  score {p.score:g}  ({len(p.buyers)} buying, {len(p.sellers)} selling)"
-            for i, p in enumerate(qualified[:top_n], start=1)
-        ) or "(no stock had enough politicians buying)"
-        trades = "\n".join(lines) or "No changes today"
-        self.notify.send(f"🏛️ Congress picks for {today:%d %b}:\n{top}\n\nTrades:\n{trades}")
+        return lines

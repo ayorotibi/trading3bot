@@ -50,13 +50,22 @@ def test_no_put_when_not_enough_cash():
     assert b.submitted == []
 
 
-def test_max_cash_pct_cap_across_symbols():
-    b = FakeBroker(prices={"SOFI": 15.0, "F": 11.0}, equity=4000, cash=4000)
+def test_skips_picks_too_expensive_for_their_budget_slice():
+    b = FakeBroker(prices={"SOFI": 15.0, "F": 9.0}, equity=4000, cash=4000)
     b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
-    b.add_chain("F", "put", TODAY, 30, [(10, -0.3, 0.25)])
-    # cap = 50% of 4000 = 2000; SOFI put secures 1300, F would add 1000 -> skipped
-    make(b, symbols=["SOFI", "F"]).run(NOW)
-    assert [o["symbol"][:4] for o in b.submitted] == ["SOFI"]
+    b.add_chain("F", "put", TODAY, 30, [(8, -0.3, 0.25)])
+    # slice = 4000 x 50% / 2 stocks = $1,000: SOFI (~$1,500) skipped, F (~$900) fits
+    make(b, symbols=["SOFI", "F"], max_symbols=2).run(NOW)
+    assert [o["symbol"][:1] for o in b.submitted] == ["F"]
+
+
+def test_moves_to_next_pick_when_options_are_illiquid():
+    b = FakeBroker(prices={"AAA": 20.0, "BBB": 20.0})
+    b.picks = ["AAA", "BBB"]
+    b.add_chain("AAA", "put", TODAY, 30, [(18, -0.3, 0.20)], spread=0.50)  # too wide
+    b.add_chain("BBB", "put", TODAY, 30, [(18, -0.3, 0.40)])
+    WheelStrategy(b, {"max_symbols": 1}, MemoryNotifier()).run(NOW)
+    assert [o["symbol"][:3] for o in b.submitted] == ["BBB"]
 
 
 def test_waits_while_short_put_open():

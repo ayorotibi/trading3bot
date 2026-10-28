@@ -1,8 +1,12 @@
 """The wheel strategy.
 
-Which stocks: by default the top-ranked "congress picks" (stocks members of
-Congress are buying) that cost at most max_share_price, up to max_symbols at
-once. A stock already mid-cycle keeps going even if it drops off the list.
+This is the main strategy. Which stocks: by default the top-ranked "congress
+picks" (stocks members of Congress are buying, weighted by each politician's
+track record), best first, up to max_symbols at once. A stock is skipped if
+one put on it would need more than its share of the cash budget
+(equity x max_cash_pct / max_symbols) or no option contract passes the
+liquidity filters; the next pick is tried instead. A stock already mid-cycle
+keeps going even if it drops off the list.
 
 For each symbol, every run works out where it is in the cycle from your
 Alpaca positions (no database needed):
@@ -30,8 +34,8 @@ log = logging.getLogger(__name__)
 
 DEFAULTS = {
     "symbols_from_congress": True,
-    "max_symbols": 3,
-    "max_share_price": 50.0,
+    "max_symbols": 5,
+    "max_share_price": None,
     "symbols": [],
     "contracts_per_symbol": 1,
     "target_dte": 30,
@@ -124,48 +128,27 @@ class WheelStrategy:
                 out[p.symbol] = Position(p.symbol, qty, p.avg_entry_price, p.current_price, False)
         return out
 
-    def choose_symbols(self, positions, orders, wheel_shares) -> list[str]:
-        """Symbols with a cycle in progress, then new ones up to max_symbols."""
-        active = []
-
-        def add(sym):
-            if sym not in active:
-                active.append(sym)
-
+    def active_symbols(self, positions, orders, wheel_shares) -> list[str]:
+        """Stocks with a wheel cycle in progress (they keep going even if they leave the picks)."""
+        active: list[str] = []
         for p in positions:
             if p.is_option and p.qty < 0:
-                add(occ.parse(p.symbol).underlying)
+                active.append(occ.parse(p.symbol).underlying)
         for o in orders:
             if o.is_option and o.client_order_id.startswith("wh-"):
-                add(occ.parse(o.symbol).underlying)
+                active.append(occ.parse(o.symbol).underlying)
         for sym, p in wheel_shares.items():
             if p.qty >= 100:
-                add(sym)
+                active.append(sym)
+        return list(dict.fromkeys(active))
 
+    def candidates(self) -> tuple[list[str], str]:
         if self.cfg["symbols_from_congress"]:
-            candidates = self.broker.load_picks() or []
-            source = "congress picks"
-            if not candidates:
-                candidates = [s.upper() for s in self.cfg["symbols"]]
-                source = "fallback symbols (no congress picks saved yet)"
-        else:
-            candidates = [s.upper() for s in self.cfg["symbols"]]
-            source = "config symbols"
-
-        limit = int(self.cfg["max_symbols"])
-        for sym in candidates:
-            if len(active) >= limit:
-                break
-            if sym in active:
-                continue
-            try:
-                price = self.broker.latest_price(sym)
-            except Exception:
-                continue
-            if price <= float(self.cfg["max_share_price"]):
-                add(sym)
-        log.info("Wheel: working on %s (new symbols from %s)", active or "nothing", source)
-        return active
+            picks = self.broker.load_picks() or []
+            if picks:
+                return picks, "congress picks"
+            return [s.upper() for s in self.cfg["symbols"]], "fallback symbols (no congress picks yet)"
+        return [s.upper() for s in self.cfg["symbols"]], "config symbols"
 
     def run(self, now: Optional[datetime] = None) -> None:
         now = now or datetime.now(timezone.utc)
@@ -175,11 +158,7 @@ class WheelStrategy:
         self._cancel_stale_orders(orders, now)
         orders = self.broker.open_orders()
         positions = self.broker.positions()
-        wheel_shares = self._wheel_shares(positions)
-        symbols = self.choose_symbols(positions, orders, wheel_shares)
-        if not symbols:
-            return
-        self._wheel_share_map = wheel_shares
+        self._wheel_share_map = self._wheel_shares(positions)
 
         self._take_profits(positions, orders, today)
         orders = self.broker.open_orders()
@@ -191,12 +170,47 @@ class WheelStrategy:
             if p.is_option and p.qty < 0 and occ.parse(p.symbol).type == "put"
         )
 
-        for sym in symbols:
+        # 1. Keep existing cycles moving (covered calls, re-selling puts after a cycle ends)
+        active = self.active_symbols(positions, orders, self._wheel_share_map)
+        for sym in active:
             try:
                 reserved += self._handle_symbol(sym, positions, orders, account, reserved, today)
             except Exception as exc:
                 log.exception("Wheel error on %s", sym)
                 self.notify.send(f"⚠️ Wheel error on {sym}: {exc}")
+
+        # 2. Start new cycles on the best-ranked stocks until max_symbols are in play
+        limit = int(self.cfg["max_symbols"])
+        free_slots = limit - len(active)
+        cands, source = self.candidates()
+        if free_slots <= 0:
+            log.info("Wheel: %d/%d stocks in play %s, not starting new ones", len(active), limit, active)
+            return
+        per_symbol = account.equity * float(self.cfg["max_cash_pct"]) / max(1, limit)
+        max_price = self.cfg.get("max_share_price")
+        contracts = int(self.cfg["contracts_per_symbol"])
+        started = []
+        for sym in cands:
+            if len(started) >= free_slots:
+                break
+            if sym in active:
+                continue
+            try:
+                spot = self.broker.latest_price(sym)
+                if max_price and spot > float(max_price):
+                    continue
+                if spot * 100 * contracts > per_symbol:
+                    log.info("Wheel: skipping %s, a put at ~$%.0f needs ~$%.0f (budget per stock $%.0f)",
+                             sym, spot, spot * 100 * contracts, per_symbol)
+                    continue
+                added = self._handle_symbol(sym, positions, orders, account, reserved, today)
+                if added > 0:
+                    reserved += added
+                    started.append(sym)
+            except Exception as exc:
+                log.exception("Wheel error on %s", sym)
+                self.notify.send(f"⚠️ Wheel error on {sym}: {exc}")
+        log.info("Wheel: in play %s, started %s (candidates from %s)", active, started or "none", source)
 
     # ---------------------------------------------------------------------
     def _cancel_stale_orders(self, orders, now: datetime) -> None:

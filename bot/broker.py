@@ -16,11 +16,14 @@ from alpaca.common.enums import Sort
 from alpaca.data.enums import DataFeed, OptionsFeed
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.enums import Adjustment
 from alpaca.data.requests import (
     OptionChainRequest,
+    StockBarsRequest,
     OptionLatestQuoteRequest,
     StockLatestTradeRequest,
 )
+from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import (
     AssetClass,
@@ -73,6 +76,7 @@ class AlpacaBroker:
         self.options_feed = OptionsFeed(options_feed)
         self.stock_feed = DataFeed(stock_feed)
         self._picks_cache: Optional[list[str]] = None
+        self._picks_saved_on: Optional[date] = None
 
     # ---- account & market -------------------------------------------------
     def market_is_open(self) -> bool:
@@ -179,8 +183,19 @@ class AlpacaBroker:
         full = self.trading.get_watchlist_by_id(w.id)
         return [a.symbol for a in (full.assets or [])]
 
+    def picks_updated_on(self, name: str = "Congress Picks") -> Optional[date]:
+        """UTC date the picks were last refreshed, or None if never."""
+        if self._picks_saved_on is not None:
+            return self._picks_saved_on
+        w = self._find_watchlist(name)
+        if w is None:
+            return None
+        ts = w.updated_at or w.created_at
+        return ts.astimezone(timezone.utc).date() if ts else None
+
     def save_picks(self, symbols: list[str], name: str = "Congress Picks") -> None:
         self._picks_cache = list(symbols)
+        self._picks_saved_on = datetime.now(timezone.utc).date()
         if self.dry_run:
             log.info("[DRY RUN] would save %d picks to watchlist %r: %s", len(symbols), name, symbols)
             return
@@ -199,6 +214,28 @@ class AlpacaBroker:
             StockLatestTradeRequest(symbol_or_symbols=symbol, feed=self.stock_feed)
         )
         return _f(res[symbol].price)
+
+    def daily_closes(self, symbols: list[str], start: date) -> dict[str, list[tuple[date, float]]]:
+        """Split- and dividend-adjusted daily closes, fetched 100 symbols at a time."""
+        out: dict[str, list[tuple[date, float]]] = {}
+        for i in range(0, len(symbols), 100):
+            batch = symbols[i : i + 100]
+            try:
+                bars = self.stock_data.get_stock_bars(
+                    StockBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame.Day,
+                        start=datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
+                        adjustment=Adjustment.ALL,
+                        feed=self.stock_feed,
+                    )
+                )
+            except APIError as exc:
+                log.warning("Price history batch %d failed: %s", i // 100 + 1, exc)
+                continue
+            for sym, rows in (bars.data or {}).items():
+                out[sym] = [(b.timestamp.date(), _f(b.close)) for b in rows if b.close]
+        return out
 
     def option_chain(
         self,

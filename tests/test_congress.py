@@ -5,6 +5,7 @@ from bot.notify import MemoryNotifier
 from bot.sources.capitol_trades import parse_date, parse_trades_html
 from bot.sources.quiver import parse_rows
 from bot.strategies.congress import CongressStrategy, rank, size_lower_bound, size_weight
+from bot.strategies.politicians import PriceHistory, trade_excess_return, track_records
 
 from .fakes import FakeBroker
 
@@ -35,6 +36,7 @@ def crowd(ticker, buyers, side="buy", **kw):
 
 
 def make(broker, items, **cfg):
+    cfg = {"buy_stocks": True, "use_track_records": False, **cfg}
     return CongressStrategy(broker, cfg, MemoryNotifier(), ListSource(items))
 
 
@@ -130,14 +132,15 @@ def test_whole_shares_when_not_fractionable():
     assert b.submitted[0]["qty"] == 41  # $5,000 / $120
 
 
-def test_runs_once_a_day_unless_no_picks_saved():
+def test_refreshes_once_a_day():
     b = FakeBroker()
     s = make(b, [])
-    assert s.due(NOW.replace(hour=10))           # nothing saved yet -> run now
-    b.picks = ["AAA"]
-    assert s.due(NOW.replace(hour=15, minute=3))
-    assert not s.due(NOW.replace(hour=15, minute=5))
-    assert not s.due(NOW.replace(hour=18))
+    assert s.due(NOW.replace(hour=14, minute=37))     # never saved -> run now
+    b.picks_date = TODAY - timedelta(days=1)
+    assert s.due(NOW.replace(hour=15, minute=2))      # stale -> first top-of-hour run
+    assert not s.due(NOW.replace(hour=15, minute=7))  # failed? retry next hour, not every 5 min
+    b.picks_date = TODAY
+    assert not s.due(NOW.replace(hour=16, minute=0))  # already done today
 
 
 def test_sends_daily_summary():
@@ -145,6 +148,67 @@ def test_sends_daily_summary():
     s = make(b, crowd("AAA", 3))
     s.run(NOW)
     assert "Congress picks" in s.notify.messages[0] and "BUY" in s.notify.messages[0]
+
+
+def test_picker_only_by_default_places_no_stock_orders():
+    b = FakeBroker(prices=prices("AAA", "BBB"))
+    CongressStrategy(b, {"use_track_records": False}, MemoryNotifier(),
+                     ListSource(crowd("AAA", 3) + crowd("BBB", 2))).run(NOW)
+    assert b.submitted == [] and b.picks == ["AAA", "BBB"]
+
+
+# ---- track records ---------------------------------------------------------
+def closes_from(start: date, prices_by_day: list[float]):
+    return [(start + timedelta(days=i), p) for i, p in enumerate(prices_by_day)]
+
+
+def test_track_record_measures_return_vs_spy_from_disclosure():
+    start = TODAY - timedelta(days=200)
+    flat = closes_from(start, [100.0] * 201)
+    rising = closes_from(start, [100.0 + i * 0.5 for i in range(201)])   # +$45 over 90 days (30-39%)
+    falling = closes_from(start, [100.0 - i * 0.2 for i in range(201)])  # -18% over 90 days
+    prices_ = PriceHistory({"SPY": flat, "WIN": rising, "LOSE": falling})
+    trades = []
+    for k in range(8):  # 8 judged buys each, published 100..170 days ago
+        pub = 100 + k * 10
+        trades.append(d("Good Trader", "WIN", "buy", published_ago=pub, traded_ago=pub + 5))
+        trades.append(d("Bad Trader", "LOSE", "buy", published_ago=pub, traded_ago=pub + 5))
+    trades.append(d("New Person", "WIN", "buy", published_ago=60, traded_ago=65))
+    recs = track_records(trades, prices_, TODAY)
+    good, bad, new = recs["Good Trader"], recs["Bad Trader"], recs["New Person"]
+    assert good.scored_trades == 8 and 0.25 < good.avg_excess < 0.45 and good.hit_rate == 1.0
+    assert bad.avg_excess < -0.1 and bad.hit_rate == 0.0
+    assert good.weight > 1.5 and bad.weight < 0.6
+    assert new.weight == 1.0  # one trade isn't enough to judge
+
+
+def test_recent_buys_too_new_to_judge_are_skipped():
+    start = TODAY - timedelta(days=60)
+    prices_ = PriceHistory({"SPY": closes_from(start, [100.0] * 61), "X": closes_from(start, [100.0] * 61)})
+    assert trade_excess_return(prices_, "X", TODAY - timedelta(days=10), TODAY, 90, 30) is None
+
+
+def test_good_traders_outrank_bigger_crowd_of_bad_ones():
+    items = ([d(f"Good {i}", "GOOD", "buy") for i in range(2)]
+             + [d(f"Bad {i}", "BAD", "buy") for i in range(3)])
+    weights = {"Good 0": 2.0, "Good 1": 2.0, "Bad 0": 0.5, "Bad 1": 0.5, "Bad 2": 0.5}
+    assert [p.ticker for p in rank(items, TODAY, 30, 90, weights=weights)] == ["GOOD", "BAD"]
+    assert [p.ticker for p in rank(items, TODAY, 30, 90)] == ["BAD", "GOOD"]
+
+
+def test_strategy_uses_track_records_from_price_history():
+    start = TODAY - timedelta(days=200)
+    b = FakeBroker(prices=prices("GOOD", "BAD", "WIN"))
+    b.closes = {"SPY": closes_from(start, [100.0] * 201),
+                "WIN": closes_from(start, [100.0 + i for i in range(201)])}
+    history = [d(f"Good {i}", "WIN", "buy", published_ago=100 + k * 10, traded_ago=110 + k * 10)
+               for i in range(2) for k in range(6)]
+    recent = ([d(f"Good {i}", "GOOD", "buy") for i in range(2)]
+              + [d(f"Bad {i}", "BAD", "buy") for i in range(3)])
+    s = CongressStrategy(b, {"history_days": 365}, MemoryNotifier(), ListSource(history + recent))
+    picks = s.run(NOW)
+    assert [p.ticker for p in picks][:2] == ["GOOD", "BAD"]
+    assert "Top traders" in s.notify.messages[0]
 
 
 # ---- data sources ----------------------------------------------------------
@@ -194,3 +258,18 @@ def test_parse_quiver_rows_all_politicians():
         [],
     )
     assert [(r.politician, r.ticker, r.side) for r in rows] == [("A", "AAPL", "buy"), ("B", "MSFT", "sell")]
+
+
+def test_end_to_end_picker_feeds_the_wheel():
+    from bot.strategies.wheel import WheelStrategy
+
+    b = FakeBroker(prices={"PRICEY": 900.0, "AAA": 30.0, "BBB": 25.0}, equity=100_000, cash=100_000)
+    b.add_chain("AAA", "put", TODAY, 30, [(28, -0.3, 0.60)])
+    b.add_chain("BBB", "put", TODAY, 30, [(23, -0.3, 0.50)])
+    items = crowd("PRICEY", 6) + crowd("AAA", 4) + crowd("BBB", 3)
+    CongressStrategy(b, {"use_track_records": False}, MemoryNotifier(), ListSource(items)).run(NOW)
+    WheelStrategy(b, {}, MemoryNotifier()).run(NOW)
+    # PRICEY ranks first but a put needs ~$90k, more than its $10k slice
+    assert b.picks == ["PRICEY", "AAA", "BBB"]
+    assert [(o["symbol"][:3], o["intent"]) for o in b.submitted] == [
+        ("AAA", "sell_to_open"), ("BBB", "sell_to_open")]
