@@ -115,11 +115,11 @@ def run_once(config: dict, dry_run: bool, force: bool) -> None:
 def make_capitol_source(cfg: dict):
     from .sources.capitol_trades import CapitolTradesSource
 
-    history = int(cfg.get("history_days", 365)) if cfg.get("use_track_records", True) else int(cfg.get("lookback_days", 30))
+    history = int(cfg.get("history_days", 180)) if cfg.get("use_track_records", True) else int(cfg.get("lookback_days", 30))
     return CapitolTradesSource(
         lookback_days=history,
         max_trade_age_days=max(history, int(cfg.get("max_trade_age_days", 90))),
-        max_pages=int(cfg.get("capitol_trades_max_pages", 200)),
+        max_pages=int(cfg.get("capitol_trades_max_pages", 120)),
     )
 
 

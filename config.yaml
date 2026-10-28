@@ -36,7 +36,7 @@ picker:
     max_trade_age_days: 90       # ignore trades made more than 90 days ago (very late filings)
     min_buyers: 2                # at least 2 different politicians buying
     use_track_records: true      # weight politicians by how their past buys did vs the S&P 500
-    history_days: 365
+    history_days: 180             # how far back to judge politicians (fewer pages = less throttling)
     track_record:
       horizon_days: 90           # judge each buy on the 90 days after it was disclosed
       min_scored_trades: 5       # fewer judged buys than this = neutral weight

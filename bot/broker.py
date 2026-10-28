@@ -80,6 +80,7 @@ class AlpacaBroker:
         self.stock_feed = DataFeed(stock_feed)
         self._picks_cache: Optional[list[str]] = None
         self._picks_saved_on: Optional[date] = None
+        self._incomplete_cache: Optional[bool] = None
 
     # ---- account & market -------------------------------------------------
     def market_is_open(self) -> bool:
@@ -188,6 +189,22 @@ class AlpacaBroker:
             return None
         ts = w.updated_at or w.created_at
         return ts.astimezone(timezone.utc).date() if ts else None
+
+    def picks_incomplete(self) -> bool:
+        """True if today's picks were saved without some data source (retry later)."""
+        if self._incomplete_cache is not None:
+            return self._incomplete_cache
+        return self._find_watchlist(PICKS_WATCHLIST + " - retry") is not None
+
+    def mark_picks_incomplete(self, incomplete: bool) -> None:
+        self._incomplete_cache = incomplete
+        if self.dry_run:
+            return
+        w = self._find_watchlist(PICKS_WATCHLIST + " - retry")
+        if incomplete and w is None:
+            self.trading.create_watchlist(CreateWatchlistRequest(name=PICKS_WATCHLIST + " - retry", symbols=["SPY"]))
+        elif not incomplete and w is not None:
+            self.trading.delete_watchlist_by_id(w.id)
 
     def save_picks(self, symbols: list[str], name: str = PICKS_WATCHLIST) -> None:
         self._picks_cache = list(symbols)

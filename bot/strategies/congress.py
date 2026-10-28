@@ -25,10 +25,10 @@ DEFAULTS = {
     "source": "capitol_trades",
     "lookback_days": 30,
     "max_trade_age_days": 90,
-    "history_days": 365,
+    "history_days": 180,
     "use_track_records": True,
     "min_buyers": 2,
-    "capitol_trades_max_pages": 200,
+    "capitol_trades_max_pages": 120,
     "track_record": {},
 }
 _SIZE_RE = re.compile(r"\$?\s*([\d,.]+)\s*([KkMm])?")

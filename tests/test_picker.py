@@ -209,3 +209,84 @@ def test_end_to_end_picks_feed_the_wheel():
     assert b.picks[:3] == ["BBB", "PRICEY", "AAA"]  # PRICEY ranks high, but a put needs $90k (slice $10k)
     assert sorted(occ.parse(o["symbol"]).underlying for o in b.submitted) == ["AAA", "BBB"]
     assert all(o["intent"] == "sell_to_open" for o in b.submitted)
+
+
+# ---- Capitol Trades throttling ------------------------------------------
+class FakeResp:
+    def __init__(self, status, text="", headers=None):
+        self.status_code, self.text, self.headers = status, text, headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"{self.status_code} Client Error: Too Many Requests")
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def _page(ticker, trade_id):
+    from .test_congress import CAPITOL_HTML
+    return CAPITOL_HTML.replace("NVDA:US", f"{ticker}:US").replace("20003801566", trade_id)
+
+
+def run_source(monkeypatch, responses, **kw):
+    import bot.sources.capitol_trades as ct
+    session = FakeSession(responses)
+    monkeypatch.setattr(ct.requests, "Session", lambda: session)
+    src = ct.CapitolTradesSource(max_pages=3, **kw)
+    waits = []
+    src._sleep = waits.append
+    return src, src.fetch(TODAY), session, waits
+
+
+def test_capitol_trades_backs_off_and_retries_on_429(monkeypatch):
+    src, rows, session, waits = run_source(
+        monkeypatch, [FakeResp(429, headers={"Retry-After": "20"}), FakeResp(200, _page("AAA", "1")),
+                      FakeResp(200, "<html></html>")])
+    assert {r.ticker for r in rows} == {"AAA", "MSFT"} and not src.partial
+    assert waits[0] == 20
+
+
+def test_capitol_trades_keeps_partial_results_when_cut_off(monkeypatch):
+    src, rows, _, _ = run_source(monkeypatch, [FakeResp(200, _page("AAA", "1"))] + [FakeResp(429)] * 4, retries=3)
+    assert src.partial and "AAA" in {r.ticker for r in rows}
+
+
+def test_capitol_trades_gives_up_when_first_page_blocked(monkeypatch):
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_source(monkeypatch, [FakeResp(429)] * 4, retries=3)
+
+
+class PartialSource(ListSource):
+    partial = True
+
+
+def test_picker_retries_hourly_until_all_sources_work():
+    b = healthy_broker("AAA", "BBB")
+    s = StockPicker(b, {"congress": {"use_track_records": False}}, MemoryNotifier(), FailingSource(),
+                    ListSource([ins("A", "AAA")]))
+    s.run(NOW.replace(hour=13, minute=35))
+    assert b.picks == ["AAA"] and b.incomplete and "Will retry every hour" in s.notify.messages[0]
+    b.picks_date = TODAY
+    assert s.due(NOW.replace(hour=14, minute=0)) and not s.due(NOW.replace(hour=14, minute=10))
+    s.run(NOW.replace(hour=14, minute=0))           # still failing: picks kept, no new message
+    assert len(s.notify.messages) == 1
+    s.congress_source = ListSource([cong(f"P{i}", "BBB") for i in range(2)])
+    s.run(NOW.replace(hour=15, minute=0))           # works now: refreshed, flag cleared
+    assert "BBB" in b.picks and not b.incomplete and len(s.notify.messages) == 2
+
+
+def test_partial_congress_data_is_flagged():
+    b = healthy_broker("AAA")
+    s = StockPicker(b, {"congress": {"use_track_records": False}}, MemoryNotifier(),
+                    PartialSource([cong(f"P{i}", "AAA") for i in range(2)]), ListSource([]))
+    s.run(NOW)
+    assert b.incomplete and "Congress data incomplete" in s.notify.messages[0]

@@ -143,6 +143,13 @@ def blend(congress: dict, insiders: dict[str, InsiderScore], techs: dict[str, Te
     return out
 
 
+def _short(exc: Exception) -> str:
+    text = str(exc)
+    if "429" in text:
+        return "the site is limiting requests (HTTP 429)"
+    return text if len(text) < 120 else text[:117] + "..."
+
+
 class StockPicker:
     name = "picker"
 
@@ -158,11 +165,17 @@ class StockPicker:
         self.reporter = reporter
 
     def due(self, now: datetime) -> bool:
-        """Once a day, on the first top-of-the-hour run with yesterday's (or no) picks; retried hourly."""
+        """Once a day, on the first top-of-the-hour run with yesterday's (or no) picks.
+
+        Retried at the top of each hour if the last refresh failed or was
+        missing a data source (e.g. Capitol Trades throttling us).
+        """
         updated = self.broker.picks_updated_on()
         if updated is None:
             return True
-        return updated < now.date() and now.minute < 5
+        if now.minute >= 5:
+            return False
+        return updated < now.date() or self.broker.picks_incomplete()
 
     def run(self, now: Optional[datetime] = None, force: bool = False) -> list[Candidate]:
         now = now or datetime.now(timezone.utc)
@@ -170,6 +183,7 @@ class StockPicker:
             log.info("Picker: today's picks are up to date (%s)", (self.broker.load_picks() or [])[:10])
             return []
         today = now.date()
+        retry = self.broker.picks_updated_on() == today
         warnings: list[str] = []
         ccfg, icfg, mcfg = self.cfg["congress"], self.cfg["insiders"], self.cfg["market"]
 
@@ -177,16 +191,18 @@ class StockPicker:
         if ccfg.get("enabled", True) and self.congress_source:
             try:
                 disclosures = self.congress_source.fetch(today)
+                if getattr(self.congress_source, "partial", False):
+                    warnings.append(f"Congress data incomplete (site throttled us after {len(disclosures)} trades)")
             except Exception as exc:
                 log.exception("Congress source failed")
-                warnings.append(f"Congress data unavailable today ({exc})")
+                warnings.append(f"Congress data unavailable ({_short(exc)})")
         buys = []
         if icfg.get("enabled", True) and self.insider_source:
             try:
                 buys = self.insider_source.fetch(today)
             except Exception as exc:
                 log.exception("Insider source failed")
-                warnings.append(f"Insider data unavailable today ({exc})")
+                warnings.append(f"Insider data unavailable ({_short(exc)})")
         actives = self.broker.most_actives(int(mcfg["top"])) if mcfg.get("most_actives", True) else []
 
         ins = insider_scores(buys, today, int(icfg["lookback_days"]), float(icfg["cluster_bonus"]),
@@ -214,9 +230,16 @@ class StockPicker:
 
         ranked = blend(cong, ins, techs, actives, self.cfg)
         picks = self._filter(ranked, techs)
+        if retry and warnings:
+            # Still missing a source: keep this morning's picks, try again next hour.
+            log.info("Picker retry: still missing data (%s); keeping current picks", "; ".join(warnings))
+            return picks
         self.broker.save_picks([c.ticker for c in picks[: int(self.cfg["keep_picks"])]])
+        self.broker.mark_picks_incomplete(bool(warnings))
+        if warnings:
+            warnings.append("Will retry every hour today")
         self._summary(picks, records, warnings, today, len(disclosures), len(buys))
-        if self.reporter and today.weekday() == 0:
+        if self.reporter and today.weekday() == 0 and not retry:
             try:
                 self.reporter.send_weekly()
             except Exception:

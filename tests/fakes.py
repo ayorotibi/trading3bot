@@ -53,6 +53,12 @@ class FakeBroker:
         self.picks = list(symbols)
         self.picks_date = "saved"
 
+    def picks_incomplete(self):
+        return getattr(self, "incomplete", False)
+
+    def mark_picks_incomplete(self, incomplete):
+        self.incomplete = incomplete
+
     def picks_updated_on(self, name="Congress Picks"):
         return self.picks_date
 
