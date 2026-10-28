@@ -64,9 +64,10 @@ wheel:
   enabled: true
   symbols_from_picks: true       # trade the picker's stocks, best first
   symbols: [F, SOFI, BAC]        # used only until the first picks exist (or if symbols_from_picks is false)
-  max_symbols: 5                 # stocks wheeled at once
-  defensive_max_symbols: 3       # ...fewer when the market turns defensive
-  max_cash_pct: 0.50             # max share of the account backing puts, split equally between stocks
+  max_symbols: 3                 # stocks wheeled at once
+  defensive_max_symbols: 2       # ...fewer when the market turns defensive
+  max_cash_pct: 0.75             # max share of the account backing puts, split equally between stocks
+                                 # (75% / 3 stocks = 25% each: $25,000 on $100k, so stocks up to ~$250)
   contracts_per_symbol: 1
 
   # --- choosing the contract ---

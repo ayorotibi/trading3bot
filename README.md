@@ -55,7 +55,7 @@ A stock is rolled at most 3 times in 120 days, then the bot accepts the outcome.
 
 **Cost basis across cycles** — the bot rebuilds each stock's full history from Alpaca's records (premiums, assignments, expiries, shares called away). Its **adjusted cost basis** = what you paid for the shares minus all premium collected in the current campaign; covered calls are never sold below it. For example, a $13 put assigned after collecting $0.80 gives an adjusted basis of $12.20. It also tracks the number of completed cycles, total premium and realised profit per stock.
 
-**Starting new cycles** — up to 5 stocks at a time (3 in a defensive market), taken from Wheel Picks best first. Each stock gets an equal slice of the cash budget (50% of the account ÷ 5 = $10,000 on $100k); a pick that's too expensive for its slice, in a downtrend, or with thinly traded options is skipped for the next. No new positions on `blackout_dates` (e.g. Fed decision days).
+**Starting new cycles** — up to 3 stocks at a time (2 in a defensive market), taken from Wheel Picks best first. Each stock gets an equal slice of the cash budget (75% of the account ÷ 3 = $25,000 on $100k, so stocks up to ~$250 a share); a pick that's too expensive for its slice, in a downtrend, or with thinly traded options is skipped for the next. No new positions on `blackout_dates` (e.g. Fed decision days).
 
 There is no database: everything is worked out from your Alpaca positions, orders and account activity each run, so it survives restarts.
 
@@ -136,8 +136,8 @@ Everything is explained in the file. The ones you're most likely to change:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `wheel.max_symbols` | `5` | Stocks wheeled at once |
-| `wheel.max_cash_pct` | `0.50` | Share of the account that can back puts. Raise it to put more cash to work |
+| `wheel.max_symbols` | `3` | Stocks wheeled at once |
+| `wheel.max_cash_pct` | `0.75` | Share of the account that can back puts, split equally between the stocks |
 | `wheel.put_target_delta` | `0.30` | Starting delta before adjustments. Higher = more premium, more assignments |
 | `wheel.take_profit_pct` | `0.50` | Buy back once half the premium is captured |
 | `wheel.target_dte` | `30` | Days to expiry. Set `7` with `min_dte: 5`, `max_dte: 10` for weekly options |
