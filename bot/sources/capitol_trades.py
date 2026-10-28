@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -106,28 +107,50 @@ def parse_trades_html(html: str, today: date) -> list[Disclosure]:
 
 
 class CapitolTradesSource:
-    def __init__(self, politicians: list[dict], pages: int = 1, timeout: int = 20):
-        self.politicians = politicians
-        self.pages = pages
+    """Reads every politician's recent trades from the public trades listing.
+
+    Pages through https://www.capitoltrades.com/trades (newest disclosures
+    first) until it reaches disclosures older than the lookback window.
+    """
+
+    def __init__(
+        self,
+        lookback_days: int = 30,
+        max_trade_age_days: int = 90,
+        max_pages: int = 60,
+        page_size: int = 96,
+        delay_seconds: float = 1.0,
+        timeout: int = 30,
+    ):
+        self.lookback_days = lookback_days
+        self.max_trade_age_days = max_trade_age_days
+        self.max_pages = max_pages
+        self.page_size = page_size
+        self.delay = delay_seconds
         self.timeout = timeout
 
     def fetch(self, today: Optional[date] = None) -> list[Disclosure]:
         today = today or datetime.utcnow().date()
-        results: list[Disclosure] = []
-        for p in self.politicians:
-            pid = p.get("capitol_trades_id")
-            if not pid:
-                log.warning("Capitol Trades: %s has no capitol_trades_id, skipping", p.get("name"))
-                continue
-            for page in range(1, self.pages + 1):
-                params = {"politician": pid, "page": page}
-                resp = requests.get(BASE_URL, params=params, headers=HEADERS, timeout=self.timeout)
-                resp.raise_for_status()
-                trades = parse_trades_html(resp.text, today)
-                log.info("Capitol Trades: %d trades for %s (page %d)", len(trades), p.get("name", pid), page)
-                if not trades:
-                    if page == 1:
-                        log.warning("Capitol Trades returned no parsable rows for %s; the page layout may have changed", pid)
-                    break
-                results.extend(trades)
-        return results
+        cutoff = today - timedelta(days=self.lookback_days)
+        results: dict[str, Disclosure] = {}
+        session = requests.Session()
+        for page in range(1, self.max_pages + 1):
+            params = {"txDate": f"{self.max_trade_age_days}d", "pageSize": self.page_size, "page": page}
+            resp = session.get(BASE_URL, params=params, headers=HEADERS, timeout=self.timeout)
+            resp.raise_for_status()
+            trades = parse_trades_html(resp.text, today)
+            if not trades:
+                if page == 1:
+                    raise RuntimeError(
+                        "Capitol Trades returned no parsable trades; the site may be blocking "
+                        "the request or its page layout changed. Try congress.source: quiver in config.yaml"
+                    )
+                break
+            for t in trades:
+                results.setdefault(t.source_id, t)
+            published = [t.published_date for t in trades if t.published_date]
+            if published and max(published) < cutoff:
+                break  # whole page is older than the window
+            time.sleep(self.delay)
+        log.info("Capitol Trades: read %d buy/sell disclosures across %d page(s)", len(results), page)
+        return list(results.values())

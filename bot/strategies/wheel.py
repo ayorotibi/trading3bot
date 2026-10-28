@@ -1,7 +1,11 @@
 """The wheel strategy.
 
-For each symbol in the config, every run works out where it is in the cycle
-from your Alpaca positions (no database needed):
+Which stocks: by default the top-ranked "congress picks" (stocks members of
+Congress are buying) that cost at most max_share_price, up to max_symbols at
+once. A stock already mid-cycle keeps going even if it drops off the list.
+
+For each symbol, every run works out where it is in the cycle from your
+Alpaca positions (no database needed):
 
   1. No shares, no short put   -> sell a cash-secured put
   2. Short put open            -> wait (take profit early if it hits the target)
@@ -15,15 +19,19 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from .. import occ
-from ..models import OptionQuote
+from ..models import OptionQuote, Position
 
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
+    "symbols_from_congress": True,
+    "max_symbols": 3,
+    "max_share_price": 50.0,
     "symbols": [],
     "contracts_per_symbol": 1,
     "target_dte": 30,
@@ -95,23 +103,83 @@ def pick_contract(
 class WheelStrategy:
     name = "wheel"
 
-    def __init__(self, broker, config: dict, notifier):
+    def __init__(self, broker, config: dict, notifier, other_strategy_prefixes=("cr-",)):
         self.broker = broker
         self.cfg = {**DEFAULTS, **(config or {})}
         self.notify = notifier
+        self.other_prefixes = other_strategy_prefixes
+
+    def _wheel_shares(self, positions) -> dict[str, Position]:
+        """Stock positions minus shares other strategies bought (e.g. congress picks)."""
+        other = defaultdict(float)
+        for prefix in self.other_prefixes:
+            for sym, qty in self.broker.strategy_holdings(prefix).items():
+                other[sym] += qty
+        out = {}
+        for p in positions:
+            if p.is_option:
+                continue
+            qty = p.qty - max(0.0, other.get(p.symbol, 0.0))
+            if qty >= 1:
+                out[p.symbol] = Position(p.symbol, qty, p.avg_entry_price, p.current_price, False)
+        return out
+
+    def choose_symbols(self, positions, orders, wheel_shares) -> list[str]:
+        """Symbols with a cycle in progress, then new ones up to max_symbols."""
+        active = []
+
+        def add(sym):
+            if sym not in active:
+                active.append(sym)
+
+        for p in positions:
+            if p.is_option and p.qty < 0:
+                add(occ.parse(p.symbol).underlying)
+        for o in orders:
+            if o.is_option and o.client_order_id.startswith("wh-"):
+                add(occ.parse(o.symbol).underlying)
+        for sym, p in wheel_shares.items():
+            if p.qty >= 100:
+                add(sym)
+
+        if self.cfg["symbols_from_congress"]:
+            candidates = self.broker.load_picks() or []
+            source = "congress picks"
+            if not candidates:
+                candidates = [s.upper() for s in self.cfg["symbols"]]
+                source = "fallback symbols (no congress picks saved yet)"
+        else:
+            candidates = [s.upper() for s in self.cfg["symbols"]]
+            source = "config symbols"
+
+        limit = int(self.cfg["max_symbols"])
+        for sym in candidates:
+            if len(active) >= limit:
+                break
+            if sym in active:
+                continue
+            try:
+                price = self.broker.latest_price(sym)
+            except Exception:
+                continue
+            if price <= float(self.cfg["max_share_price"]):
+                add(sym)
+        log.info("Wheel: working on %s (new symbols from %s)", active or "nothing", source)
+        return active
 
     def run(self, now: Optional[datetime] = None) -> None:
         now = now or datetime.now(timezone.utc)
         today = now.date()
-        symbols = [s.upper() for s in self.cfg["symbols"]]
-        if not symbols:
-            log.info("Wheel: no symbols configured, skipping")
-            return
 
         orders = self.broker.open_orders()
         self._cancel_stale_orders(orders, now)
         orders = self.broker.open_orders()
         positions = self.broker.positions()
+        wheel_shares = self._wheel_shares(positions)
+        symbols = self.choose_symbols(positions, orders, wheel_shares)
+        if not symbols:
+            return
+        self._wheel_share_map = wheel_shares
 
         self._take_profits(positions, orders, today)
         orders = self.broker.open_orders()
@@ -171,7 +239,7 @@ class WheelStrategy:
             log.info("Wheel %s: order already working, waiting", sym)
             return 0.0
 
-        shares = next((p for p in positions if not p.is_option and p.symbol == sym), None)
+        shares = getattr(self, "_wheel_share_map", {}).get(sym)
         share_qty = shares.qty if shares else 0
         shorts = [p for p in positions if p.is_option and p.qty < 0 and occ.parse(p.symbol).underlying == sym]
         short_puts = [p for p in shorts if occ.parse(p.symbol).type == "put"]

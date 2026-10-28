@@ -125,3 +125,31 @@ def test_skips_illiquid_contracts():
     b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.20)], spread=0.30)  # spread is > mid
     make(b).run(NOW)
     assert b.submitted == []
+
+
+def test_wheel_picks_affordable_congress_stocks_up_to_max_symbols():
+    b = FakeBroker(prices={"NVDA": 180.0, "SOFI": 15.0, "F": 11.0, "BAC": 40.0})
+    b.picks = ["NVDA", "SOFI", "F", "BAC"]  # NVDA is above max_share_price
+    for sym, strike in (("SOFI", 13), ("F", 10), ("BAC", 37)):
+        b.add_chain(sym, "put", TODAY, 30, [(strike, -0.3, 0.45)])
+    WheelStrategy(b, {"max_symbols": 2, "max_share_price": 50}, MemoryNotifier()).run(NOW)
+    assert [o["symbol"][:4].rstrip("0123456789") for o in b.submitted] == ["SOFI", "F"]
+
+
+def test_wheel_keeps_running_cycle_after_stock_leaves_picks():
+    b = FakeBroker(prices={"SOFI": 12.0, "F": 11.0})
+    b.picks = ["F"]
+    b.pos.append(Position("SOFI", 100, 13.0, 12.0, False))  # assigned earlier
+    b.add_chain("SOFI", "call", TODAY, 30, [(13, 0.3, 0.30)])
+    WheelStrategy(b, {"max_symbols": 1}, MemoryNotifier()).run(NOW)
+    assert [o["symbol"][:4] for o in b.submitted] == ["SOFI"]  # F not started, limit is 1
+
+
+def test_wheel_ignores_shares_owned_by_congress_strategy():
+    b = FakeBroker(prices={"SOFI": 12.0})
+    b.picks = []
+    b.pos.append(Position("SOFI", 150, 12.0, 12.0, False))
+    b.holdings = {"SOFI": 150}  # all bought by the congress strategy
+    b.add_chain("SOFI", "call", TODAY, 30, [(13, 0.3, 0.30)])
+    WheelStrategy(b, {"symbols_from_congress": True, "symbols": []}, MemoryNotifier()).run(NOW)
+    assert b.submitted == []  # no covered calls on congress shares

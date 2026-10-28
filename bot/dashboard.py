@@ -32,8 +32,8 @@ LABELS = {
     "wh-put": "Wheel · sell put",
     "wh-call": "Wheel · covered call",
     "wh-tp": "Wheel · take profit",
-    "ct-buy": "Copy trade · buy",
-    "ct-sell": "Copy trade · sell",
+    "cr-buy": "Congress · buy",
+    "cr-sell": "Congress · sell",
 }
 
 
@@ -83,6 +83,10 @@ class Data:
             orders = [o for o in orders if strategy_label(o.client_order_id) != "Other / manual"]
         positions = self.client.get_all_positions()
         clock = self.client.get_clock()
+        picks = []
+        for w in self.client.get_watchlists():
+            if w.name == "Congress Picks":
+                picks = [a.symbol for a in (self.client.get_watchlist_by_id(w.id).assets or [])]
 
         rows = []
         for o in orders:
@@ -121,6 +125,9 @@ class Data:
             orders="".join(rows) or empty,
             positions="".join(pos_rows) or no_pos,
             toggle=toggle,
+            picks=" ".join(f"<span class='pick'><small>{i}</small> {html.escape(sym)}</span>"
+                           for i, sym in enumerate(picks[:15], 1))
+            or "<span class='muted'>No ranking yet — it is created on the first run during market hours</span>",
         )
 
 
@@ -147,6 +154,9 @@ th{{color:var(--muted);font-weight:500;font-size:13px}} tr:last-child td{{border
 .st-filled{{background:color-mix(in srgb,var(--up) 18%,transparent);color:var(--up)}}
 .st-canceled,.st-expired,.st-rejected{{color:var(--muted)}}
 .up{{color:var(--up)}} .down{{color:var(--down)}} .empty{{color:var(--muted);text-align:center;padding:20px}}
+.picks{{display:flex;flex-wrap:wrap;gap:6px}}
+.pick{{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-weight:600}}
+.pick small{{color:var(--muted);font-weight:400}}
 a{{color:var(--accent)}} .muted{{color:var(--muted);font-size:13px}}
 </style></head><body><main>
 <header><h1>Trade Log <span class="badge {mode_cls}">{mode}</span></h1>
@@ -156,6 +166,8 @@ a{{color:var(--accent)}} .muted{{color:var(--muted);font-size:13px}}
 <div class="stat"><small>Cash</small><b>{cash}</b></div>
 <div class="stat"><small>Options buying power</small><b>{obp}</b></div>
 </div>
+<h2>Congress picks <span class="muted">· stocks politicians are buying most, best first</span></h2>
+<div class="picks">{picks}</div>
 <h2>Positions</h2>
 <div class="wrap"><table><tr><th>Holding</th><th>Qty</th><th>Avg price</th><th>Now</th><th>Unrealised P/L</th></tr>{positions}</table></div>
 <h2>Orders <span class="muted">· {toggle}</span></h2>

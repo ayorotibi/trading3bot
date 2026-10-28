@@ -1,7 +1,7 @@
 """Politician trades from the Quiver Quantitative API (paid, official API).
 
 Set QUIVER_API_TOKEN. Uses the live congress trading endpoint and filters it
-to the politicians in your config by name.
+to the politicians in your config by name (all politicians if none are given).
 """
 from __future__ import annotations
 
@@ -67,8 +67,9 @@ def parse_rows(rows: list[dict], wanted_names: list[str]) -> list[Disclosure]:
 
 
 class QuiverSource:
-    def __init__(self, politicians: list[dict], token: Optional[str] = None, timeout: int = 30):
-        self.names = [p["name"] for p in politicians if p.get("name")]
+    def __init__(self, politicians: Optional[list[dict]] = None, token: Optional[str] = None, timeout: int = 30):
+        # Empty list = every politician
+        self.names = [p["name"] for p in (politicians or []) if p.get("name")]
         self.token = token or os.getenv("QUIVER_API_TOKEN", "")
         self.timeout = timeout
 

@@ -2,12 +2,12 @@
 
 An automated trading bot for [Alpaca](https://alpaca.markets) running two strategies:
 
-- **The wheel (options):** sell cash-secured puts on stocks you'd be happy to own. If you're assigned the shares, sell covered calls on them (never below what you paid). When the shares are called away, start again with puts.
-- **Politician copy trading:** read public congressional trade disclosures (Michael McCaul by default) and mirror them with a fixed dollar amount per trade.
+- **Congress "follow the crowd":** every trading day, read the disclosed stock trades of **all** members of Congress from [Capitol Trades](https://www.capitoltrades.com/trades), rank stocks by how many different politicians are buying them, and hold the top 10 with 30% of the account.
+- **The wheel (options):** sell cash-secured puts on the top-ranked congress stocks the account can afford. If you're assigned the shares, sell covered calls on them (never below what you paid). When the shares are called away, start again with puts.
 
 It runs on a schedule on [Render](https://render.com) (every 5 minutes during US market hours), sends every trade to Telegram and/or Discord, and has a password-protected **trade log page** listing everything it has done. It can also run on your own desktop or laptop.
 
-> ⚠️ **Paper trading by default.** This is a tool for automating your own rules, not financial advice, and none of these strategies is guaranteed to make money. Selling options can lose far more than the premium collected if a stock falls sharply. Politicians have up to 45 days to disclose trades, so copied trades always arrive late. Run it on paper for weeks before considering real money.
+> ⚠️ **Paper trading by default.** This is a tool for automating your own rules, not financial advice, and none of these strategies is guaranteed to make money. Selling options can lose far more than the premium collected if a stock falls sharply. Politicians have up to 45 days to disclose trades, so the bot always buys after they did, and research on whether following them beats the market is mixed. Run it on paper for weeks before considering real money.
 
 ---
 
@@ -16,12 +16,18 @@ It runs on a schedule on [Render](https://render.com) (every 5 minutes during US
 Every run (every 5 minutes, market hours only):
 
 1. Checks Alpaca's market clock and exits if the market is closed (including holidays).
-2. **Wheel**, for each symbol in `config.yaml`:
+2. **Congress** (once a day at 15:00 UTC, or straight away on the very first run):
+   - Reads every buy and sell disclosed in the last 30 days (trades made within the last 90 days).
+   - Scores each stock: each different politician buying adds 1 point for a small trade, up to 4 for $1M+; each politician selling subtracts the same way. One person buying five times still counts once.
+   - Keeps stocks with **at least 2 different politicians buying**, more buying than selling, tradable on Alpaca, priced above $5.
+   - Holds the **top 10**, each getting an equal share of **30% of equity** (3% each). Keeps a holding while it stays in the top 15, and sells it when it drops further or politicians turn net sellers.
+   - Saves the ranking to an Alpaca watchlist called **Congress Picks** (visible in the Alpaca app) and sends you a Telegram summary.
+   - Only ever sells shares it bought itself; wheel shares and anything you buy by hand are left alone.
+3. **Wheel**, on up to 3 stocks at a time, taken from the Congress Picks list in rank order (skipping any priced over $50, since a put needs strike × 100 in cash). A stock already mid-cycle keeps going even if it drops off the list:
    - Short put open → wait. If 50% of the premium is already captured, buy it back.
    - Own 100+ shares not yet covered → sell covered calls at ~0.30 delta, 21–45 days out, strike at or above your cost basis.
    - Nothing open → sell a cash-secured put at ~0.30 delta, 21–45 days out, if you have the cash and stay under the `max_cash_pct` cap.
    - Unfilled orders are cancelled and re-priced at the new mid after 30 minutes.
-3. **Copy trading** (every 30 minutes): fetches recent disclosures. New buys published in the last 7 days get a $500 market buy; disclosed sales close your position in that stock. Each disclosure is copied once only.
 
 There is no database. The bot works out its state from your Alpaca positions and order history every run, so it survives restarts.
 
@@ -29,8 +35,8 @@ There is no database. The bot works out its state from your Alpaca positions and
 
 | Where | What you see |
 |---|---|
-| **Telegram / Discord** | A message for every order placed, every take-profit, and any error |
-| **Trade log page** | Every bot order (strategy, contract, price, filled or not), current positions with P/L, cash and equity. Auto-refreshes every minute |
+| **Telegram / Discord** | A daily congress summary (top 10 and trades made), a message for every wheel order and take-profit, and any error |
+| **Trade log page** | Today's congress picks, every bot order (strategy, contract, price, filled or not), current positions with P/L, cash and equity. Auto-refreshes every minute |
 | **Render → trading-bot → Logs** | The full log of every run, including why it *didn't* trade (e.g. "no put met the filters", "need $1,300, only $900 available") |
 
 ---
@@ -95,17 +101,26 @@ Everything is commented in the file. The ones you're most likely to change:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `wheel.symbols` | `[F, SOFI, BAC]` | Stocks to wheel. Each put needs strike × 100 in cash (a $12 put ties up $1,200) |
+| `congress.top_n` | `10` | How many congress stocks to hold |
+| `congress.budget_pct` | `0.30` | Share of equity for congress stocks, split equally |
+| `congress.min_buyers` | `2` | Different politicians needed before a stock counts |
+| `congress.lookback_days` | `30` | How far back to count disclosures |
+| `congress.exclude` | `[]` | Tickers never to buy |
+| `congress.source` | `capitol_trades` | Free, read from capitoltrades.com. `quiver` uses Quiver Quantitative's paid API (~$30/month), which is more reliable |
+| `wheel.max_symbols` | `3` | Stocks wheeled at once |
+| `wheel.max_share_price` | `50` | Most expensive stock the wheel will start on. A $50 stock's put ties up ~$5,000 |
+| `wheel.symbols_from_congress` | `true` | `false` = wheel the fixed `wheel.symbols` list instead |
 | `wheel.put_target_delta` | `0.30` | Higher = more premium, more likely to be assigned |
 | `wheel.take_profit_pct` | `0.50` | Buy back once half the premium is captured. `0` = hold to expiry |
 | `wheel.max_cash_pct` | `0.50` | Max share of equity tied up securing puts |
-| `copy_trading.politicians` | McCaul | Add more using the ID in their capitoltrades.com URL |
-| `copy_trading.amount_per_trade_usd` | `500` | Dollars per copied buy |
-| `copy_trading.source` | `capitol_trades` | Free, scraped from capitoltrades.com. `quiver` uses Quiver Quantitative's paid API (~$30/month), which is more reliable |
 
-Turn either strategy off with `enabled: false`.
+Turn either strategy off with `enabled: false`. Together the defaults can use up to 80% of the account (30% congress stocks + 50% securing puts).
 
-**Michael McCaul** announced he isn't running for re-election in 2026, so his disclosures will stop once he leaves office in January 2027. Add other politicians before then.
+**See the ranking without trading** (on your own computer, no Alpaca keys needed):
+
+```bash
+python -m bot.main --picks
+```
 
 ## Going live (real money)
 
@@ -121,7 +136,8 @@ Without step 3 the bot refuses to start in live mode. The trade log page shows a
 
 - **Capitol Trades has no official API.** If they redesign their page, the scraper may stop finding trades; you'll see a "page layout may have changed" warning in the logs. Switch to `source: quiver` if that happens.
 - **Free option data is delayed/indicative.** Prices are fine for 30-day options sold at the mid, but fills may lag. Upgrade to `options_feed: opra` if you have Alpaca's paid data plan.
-- **Mirrored sales close your whole position** in that stock, including shares you bought yourself, so use a dedicated Alpaca account. Wheel symbols are never touched by copy trading.
+- **Use a dedicated Alpaca account.** The congress strategy only sells shares it bought, but the wheel will sell covered calls on any 100+ shares it finds that the congress strategy didn't buy, including ones you bought yourself.
+- **Capitol Trades may block Render's servers.** If the daily summary says it couldn't read Capitol Trades, switch to `source: quiver`.
 - **Early assignment, earnings and dividends** aren't specially handled; the bot reacts to whatever positions it finds on the next run.
 
 ## Project layout
@@ -129,7 +145,7 @@ Without step 3 the bot refuses to start in live mode. The trade log page shows a
 ```
 bot/main.py                     entry point (run once / loop / dry run)
 bot/strategies/wheel.py         the wheel
-bot/strategies/copy_trading.py  politician copy trading
+bot/strategies/congress.py      congress follow-the-crowd
 bot/sources/capitol_trades.py   capitoltrades.com scraper
 bot/sources/quiver.py           Quiver Quantitative API
 bot/broker.py                   Alpaca wrapper (all orders go through here)

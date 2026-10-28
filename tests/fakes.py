@@ -19,6 +19,8 @@ class FakeBroker:
         self.chains: dict[tuple, list[OptionQuote]] = {}
         self.quotes: dict[str, tuple[float, float]] = {}
         self.assets: dict[str, dict] = {}
+        self.picks = None
+        self.holdings: dict[str, float] = {}  # shares owned by the congress strategy ("cr-")
 
     # broker API used by strategies
     def market_is_open(self):
@@ -38,6 +40,15 @@ class FakeBroker:
 
     def asset_info(self, symbol):
         return self.assets.get(symbol, {"tradable": True, "fractionable": True})
+
+    def strategy_holdings(self, prefix):
+        return dict(self.holdings) if prefix == "cr-" else {}
+
+    def load_picks(self, name="Congress Picks"):
+        return None if self.picks is None else list(self.picks)
+
+    def save_picks(self, symbols, name="Congress Picks"):
+        self.picks = list(symbols)
 
     def latest_price(self, symbol):
         return self.prices[symbol]

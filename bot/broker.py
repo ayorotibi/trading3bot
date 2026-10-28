@@ -7,10 +7,12 @@ is sent to Alpaca: order methods log what they would have done.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from alpaca.common.exceptions import APIError
+from alpaca.common.enums import Sort
 from alpaca.data.enums import DataFeed, OptionsFeed
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
@@ -28,7 +30,13 @@ from alpaca.trading.enums import (
     QueryOrderStatus,
     TimeInForce,
 )
-from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.requests import (
+    CreateWatchlistRequest,
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    UpdateWatchlistRequest,
+)
 
 from . import occ
 from .models import Account, OpenOrder, OptionQuote, Position
@@ -64,6 +72,7 @@ class AlpacaBroker:
         self.option_data = OptionHistoricalDataClient(api_key, secret_key)
         self.options_feed = OptionsFeed(options_feed)
         self.stock_feed = DataFeed(stock_feed)
+        self._picks_cache: Optional[list[str]] = None
 
     # ---- account & market -------------------------------------------------
     def market_is_open(self) -> bool:
@@ -126,6 +135,63 @@ class AlpacaBroker:
         except APIError:
             return None
         return {"tradable": bool(a.tradable), "fractionable": bool(a.fractionable)}
+
+    def strategy_holdings(self, prefix: str, days: int = 730) -> dict[str, float]:
+        """Net shares bought minus sold by orders whose client_order_id starts with prefix.
+
+        Alpaca's order history is the bot's memory: it tells us which shares
+        belong to which strategy, with no database needed.
+        """
+        out: dict[str, float] = defaultdict(float)
+        seen: set[str] = set()
+        after = datetime.now(timezone.utc) - timedelta(days=days)
+        while True:
+            batch = self.trading.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500, after=after, direction=Sort.ASC)
+            )
+            new = [o for o in batch if str(o.id) not in seen]
+            for o in new:
+                seen.add(str(o.id))
+                if not (o.client_order_id or "").startswith(prefix):
+                    continue
+                filled = _f(o.filled_qty)
+                if filled:
+                    out[o.symbol] += filled if _enum_value(o.side) == "buy" else -filled
+            if len(batch) < 500 or not new:
+                break
+            after = max(o.submitted_at or o.created_at for o in batch)
+        return {s: round(q, 9) for s, q in out.items() if abs(q) > 1e-9}
+
+    # ---- saved stock picks (an Alpaca watchlist) --------------------------
+    def _find_watchlist(self, name: str):
+        for w in self.trading.get_watchlists():
+            if w.name == name:
+                return w
+        return None
+
+    def load_picks(self, name: str = "Congress Picks") -> Optional[list[str]]:
+        """Ranked symbols saved by the congress strategy, or None if never saved."""
+        if self._picks_cache is not None:
+            return list(self._picks_cache)
+        w = self._find_watchlist(name)
+        if w is None:
+            return None
+        full = self.trading.get_watchlist_by_id(w.id)
+        return [a.symbol for a in (full.assets or [])]
+
+    def save_picks(self, symbols: list[str], name: str = "Congress Picks") -> None:
+        self._picks_cache = list(symbols)
+        if self.dry_run:
+            log.info("[DRY RUN] would save %d picks to watchlist %r: %s", len(symbols), name, symbols)
+            return
+        if not symbols:
+            log.info("No picks to save; keeping the previous watchlist")
+            return
+        w = self._find_watchlist(name)
+        if w is None:
+            self.trading.create_watchlist(CreateWatchlistRequest(name=name, symbols=symbols))
+        else:
+            self.trading.update_watchlist_by_id(w.id, UpdateWatchlistRequest(name=name, symbols=symbols))
 
     # ---- market data ------------------------------------------------------
     def latest_price(self, symbol: str) -> float:

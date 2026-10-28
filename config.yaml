@@ -6,13 +6,32 @@ data:
   stock_feed: iex            # free; use "sip" with a paid data plan
 
 # ---------------------------------------------------------------------------
+# Congress: buy the stocks members of Congress are buying (all of them)
+# ---------------------------------------------------------------------------
+congress:
+  enabled: true
+  source: capitol_trades     # free, read from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
+
+  lookback_days: 30          # count disclosures published in the last 30 days
+  max_trade_age_days: 90     # ignore trades the politician made more than 90 days ago
+  min_buyers: 2              # a stock needs at least 2 different politicians buying it
+  top_n: 10                  # hold the 10 best-scoring stocks...
+  budget_pct: 0.30           # ...using 30% of account equity, split equally (3% each)
+  hold_rank: 15              # keep a holding while it ranks in the top 15 (stops daily churn)
+  min_price: 5.0             # skip penny stocks
+  exclude: []                # tickers never to buy, e.g. [TSLA, GME]
+  rebalance_time_utc: "15:00"  # once a day: 15:00 UTC = 15:00 UK winter time, 16:00 UK summer time
+  capitol_trades_max_pages: 60
+
+# ---------------------------------------------------------------------------
 # The wheel: sell cash-secured puts -> if assigned, sell covered calls -> repeat
 # ---------------------------------------------------------------------------
 wheel:
   enabled: true
-  # Stocks you'd be happy to own. Each put contract needs strike x 100 in cash,
-  # e.g. a $12 put secures $1,200.
-  symbols: [F, SOFI, BAC]
+  symbols_from_congress: true  # pick stocks from the congress ranking (best first)
+  max_symbols: 3               # wheel at most 3 stocks at a time
+  max_share_price: 50          # a put on a $50 stock ties up ~$5,000; raise this if you have more cash
+  symbols: [F, SOFI, BAC]      # used before the first congress ranking exists, or if symbols_from_congress is false
   contracts_per_symbol: 1
 
   target_dte: 30          # aim for expiries about 30 days out...
@@ -28,24 +47,3 @@ wheel:
   calls_never_below_cost_basis: true  # never sell a call that would lock in a loss on assignment
   max_cash_pct: 0.50      # at most 50% of account equity tied up securing puts
   reprice_after_minutes: 30  # cancel and re-price unfilled orders after this long
-
-# ---------------------------------------------------------------------------
-# Politician copy trading
-# ---------------------------------------------------------------------------
-copy_trading:
-  enabled: true
-  source: capitol_trades   # free, scraped from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
-  politicians:
-    - name: Michael McCaul         # used for matching on Quiver
-      capitol_trades_id: M001157   # the ID in his capitoltrades.com/politicians/... URL
-    # - name: Nancy Pelosi
-    #   capitol_trades_id: P000197
-
-  amount_per_trade_usd: 500   # dollars per copied buy
-  lookback_days: 7            # only act on disclosures published in the last 7 days
-  max_trade_age_days: 60      # ignore trades the politician made more than 60 days ago
-  mirror_sells: true          # when they disclose a sale, sell your whole position in that stock
-  max_open_positions: 20
-  skip_if_already_held: false # true = don't add to a stock you already own
-  check_every_minutes: 30     # disclosures change slowly; no need to check every 5 minutes
-  capitol_trades_pages: 1

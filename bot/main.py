@@ -4,6 +4,7 @@
   python -m bot.main --loop     keep running every 5 minutes (for your own computer)
   python -m bot.main --dry-run  log decisions without placing orders
   python -m bot.main --force    run even when the market is closed (dry runs only)
+  python -m bot.main --picks    print today's congress ranking and exit (no trading)
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ def build(config: dict, dry_run: bool):
     from .broker import AlpacaBroker
     from .sources.capitol_trades import CapitolTradesSource
     from .sources.quiver import QuiverSource
-    from .strategies.copy_trading import CopyTradingStrategy
+    from .strategies.congress import CongressStrategy
     from .strategies.wheel import WheelStrategy
 
     key = os.getenv("ALPACA_API_KEY", "")
@@ -67,19 +68,22 @@ def build(config: dict, dry_run: bool):
     notifier = Notifier(prefix=f"[{mode}{' DRY-RUN' if dry_run else ''}] ")
 
     strategies = []
+    congress_cfg = config.get("congress", {})
+    if congress_cfg.get("enabled"):
+        if congress_cfg.get("source", "capitol_trades") == "quiver":
+            source = QuiverSource()
+        else:
+            source = CapitolTradesSource(
+                lookback_days=int(congress_cfg.get("lookback_days", 30)),
+                max_trade_age_days=int(congress_cfg.get("max_trade_age_days", 90)),
+                max_pages=int(congress_cfg.get("capitol_trades_max_pages", 60)),
+            )
+        # Runs first, so on rebalance days the wheel sees today's picks.
+        strategies.append(CongressStrategy(broker, congress_cfg, notifier, source))
+
     wheel_cfg = config.get("wheel", {})
     if wheel_cfg.get("enabled"):
         strategies.append(WheelStrategy(broker, wheel_cfg, notifier))
-
-    copy_cfg = config.get("copy_trading", {})
-    if copy_cfg.get("enabled"):
-        politicians = copy_cfg.get("politicians", [])
-        if copy_cfg.get("source", "capitol_trades") == "quiver":
-            source = QuiverSource(politicians)
-        else:
-            source = CapitolTradesSource(politicians, pages=int(copy_cfg.get("capitol_trades_pages", 1)))
-        protected = set(wheel_cfg.get("symbols", [])) if wheel_cfg.get("enabled") else set()
-        strategies.append(CopyTradingStrategy(broker, copy_cfg, notifier, source, protected))
 
     return broker, notifier, strategies, mode
 
@@ -97,7 +101,7 @@ def run_once(config: dict, dry_run: bool, force: bool) -> None:
     log.info("Running %d strategies in %s mode%s", len(strategies), mode, " (dry run)" if broker.dry_run else "")
     for strat in strategies:
         try:
-            if strat.name == "copy_trading":
+            if strat.name == "congress":
                 strat.run(force=force)
             else:
                 strat.run()
@@ -106,13 +110,37 @@ def run_once(config: dict, dry_run: bool, force: bool) -> None:
             notifier.send(f"❌ {strat.name} failed: {type(exc).__name__}: {exc}")
 
 
+def show_picks(config: dict) -> None:
+    """Print the ranking straight from the data source; needs no Alpaca keys."""
+    from datetime import date
+
+    from .sources.capitol_trades import CapitolTradesSource
+    from .sources.quiver import QuiverSource
+    from .strategies.congress import DEFAULTS, rank
+
+    cfg = {**DEFAULTS, **config.get("congress", {})}
+    source = QuiverSource() if cfg["source"] == "quiver" else CapitolTradesSource(
+        lookback_days=int(cfg["lookback_days"]), max_trade_age_days=int(cfg["max_trade_age_days"]),
+        max_pages=int(cfg["capitol_trades_max_pages"]))
+    today = date.today()
+    picks = rank(source.fetch(today), today, int(cfg["lookback_days"]), int(cfg["max_trade_age_days"]),
+                 set(cfg["exclude"]))
+    picks = [p for p in picks if p.score > 0 and len(p.buyers) >= int(cfg["min_buyers"])]
+    print(f"{'#':>3}  {'Ticker':<7} {'Score':>6}  Buyers  Sellers  Who's buying")
+    for i, p in enumerate(picks[:30], 1):
+        print(f"{i:>3}  {p.ticker:<7} {p.score:>6.1f}  {len(p.buyers):>6}  {len(p.sellers):>7}  {', '.join(p.buyers[:5])}")
+    if not picks:
+        print("No stock had enough different politicians buying it.")
+
+
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Alpaca wheel + politician copy-trading bot")
+    parser = argparse.ArgumentParser(description="Alpaca wheel + congress follow-the-crowd bot")
     parser.add_argument("--config", default=os.getenv("BOT_CONFIG", "config.yaml"))
     parser.add_argument("--dry-run", action="store_true", help="log orders instead of placing them")
     parser.add_argument("--force", action="store_true", help="run even when the market is closed")
     parser.add_argument("--loop", action="store_true", help="run forever, every --interval minutes")
     parser.add_argument("--interval", type=int, default=5)
+    parser.add_argument("--picks", action="store_true", help="print the congress stock ranking and exit")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -128,6 +156,10 @@ def main(argv=None) -> None:
 
     config = load_config(args.config)
     dry_run = args.dry_run or env_bool("DRY_RUN", False)
+
+    if args.picks:
+        show_picks(config)
+        return
 
     if not args.loop:
         run_once(config, dry_run, args.force)
