@@ -4,7 +4,8 @@
   python -m bot.main --loop     keep running every 5 minutes (for your own computer)
   python -m bot.main --dry-run  log decisions without placing orders
   python -m bot.main --force    run even when the market is closed (dry runs only)
-  python -m bot.main --picks    print today's congress ranking and exit (no trading)
+  python -m bot.main --picks    run the stock picker now and print the ranking (no trading)
+  python -m bot.main --report   print the wheel report: cost basis, premiums, profit per stock
 """
 from __future__ import annotations
 
@@ -36,50 +37,56 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def build(config: dict, dry_run: bool):
+def make_broker(config: dict, dry_run: bool):
     from .broker import AlpacaBroker
-    from .sources.quiver import QuiverSource
-    from .strategies.congress import CongressStrategy
-    from .strategies.wheel import WheelStrategy
 
     key = os.getenv("ALPACA_API_KEY", "")
     secret = os.getenv("ALPACA_SECRET_KEY", "")
     if not key or not secret:
         sys.exit("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set")
-
     paper = env_bool("ALPACA_PAPER", True)
     if not paper and os.getenv("LIVE_TRADING_CONFIRM", "") != LIVE_CONFIRM_PHRASE:
         sys.exit(
             "ALPACA_PAPER is false but LIVE_TRADING_CONFIRM is not set to "
             f"{LIVE_CONFIRM_PHRASE!r}. Refusing to trade real money."
         )
-
     data_cfg = config.get("data", {})
-    broker = AlpacaBroker(
-        key,
-        secret,
-        paper=paper,
-        dry_run=dry_run,
-        options_feed=data_cfg.get("options_feed", "indicative"),
-        stock_feed=data_cfg.get("stock_feed", "iex"),
-    )
-    mode = "PAPER" if paper else "LIVE"
+    broker = AlpacaBroker(key, secret, paper=paper, dry_run=dry_run,
+                          options_feed=data_cfg.get("options_feed", "indicative"),
+                          stock_feed=data_cfg.get("stock_feed", "iex"))
+    return broker, ("PAPER" if paper else "LIVE")
+
+
+def make_picker(config: dict, broker, notifier, reporter=None):
+    from .sources.openinsider import OpenInsiderSource
+    from .sources.quiver import QuiverSource
+    from .strategies.picker import DEFAULTS, StockPicker
+
+    pcfg = config.get("picker", {})
+    ccfg = pcfg.get("congress", {})
+    icfg = {**DEFAULTS["insiders"], **(pcfg.get("insiders") or {})}
+    congress_source = QuiverSource() if ccfg.get("source") == "quiver" else make_capitol_source(ccfg)
+    insider_source = OpenInsiderSource(lookback_days=int(icfg["lookback_days"]), min_value=float(icfg["min_value"]))
+    return StockPicker(broker, pcfg, notifier, congress_source, insider_source, reporter)
+
+
+def build(config: dict, dry_run: bool):
+    from .events import EarningsCalendar
+    from .ledger import Ledger
+    from .report import WeeklyReport
+    from .strategies.wheel import WheelStrategy
+
+    broker, mode = make_broker(config, dry_run)
     notifier = Notifier(prefix=f"[{mode}{' DRY-RUN' if dry_run else ''}] ")
+    ledger = Ledger(broker)
 
     strategies = []
-    congress_cfg = config.get("congress", {})
-    if congress_cfg.get("enabled"):
-        if congress_cfg.get("source", "capitol_trades") == "quiver":
-            source = QuiverSource()
-        else:
-            source = make_capitol_source(congress_cfg)
-        # Runs first, so on rebalance days the wheel sees today's picks.
-        strategies.append(CongressStrategy(broker, congress_cfg, notifier, source))
-
+    # The picker runs first, so the morning refresh is in place before the wheel trades.
+    if config.get("picker", {}).get("enabled", True):
+        strategies.append(make_picker(config, broker, notifier, WeeklyReport(broker, notifier, ledger)))
     wheel_cfg = config.get("wheel", {})
-    if wheel_cfg.get("enabled"):
-        strategies.append(WheelStrategy(broker, wheel_cfg, notifier))
-
+    if wheel_cfg.get("enabled", True):
+        strategies.append(WheelStrategy(broker, wheel_cfg, notifier, EarningsCalendar(), ledger))
     return broker, notifier, strategies, mode
 
 
@@ -96,7 +103,7 @@ def run_once(config: dict, dry_run: bool, force: bool) -> None:
     log.info("Running %d strategies in %s mode%s", len(strategies), mode, " (dry run)" if broker.dry_run else "")
     for strat in strategies:
         try:
-            if strat.name == "congress":
+            if strat.name == "picker":
                 strat.run(force=force)
             else:
                 strat.run()
@@ -116,63 +123,36 @@ def make_capitol_source(cfg: dict):
     )
 
 
+class PrintNotifier:
+    def send(self, message: str) -> None:
+        print(message + "\n")
+
+
 def show_picks(config: dict) -> None:
-    """Print politicians' track records and the stock ranking. Trades nothing.
+    """Run the stock picker now and print the result. Places no orders, saves nothing."""
+    broker, _ = make_broker(config, dry_run=True)
+    picks = make_picker(config, broker, PrintNotifier()).run(force=True)
+    print(f"{'#':>3}  {'Ticker':<7} {'Score':>5}  Congress  Insiders  Market  Trend")
+    for i, c in enumerate(picks, 1):
+        print(f"{i:>3}  {c.ticker:<7} {c.score:>5.2f}  {c.congress:>8.2f}  {c.insiders:>8.2f}  {c.market:>6.2f}  {c.trend}")
 
-    Uses Alpaca keys (from .env) for price history if present; without them the
-    ranking is shown without track-record weighting.
-    """
-    from datetime import date
 
-    from .sources.quiver import QuiverSource
-    from .strategies.congress import DEFAULTS, rank
-    from .strategies.politicians import DEFAULTS as TRACK_DEFAULTS
-    from .strategies.politicians import PriceHistory, top_traders, track_records
+def show_report(config: dict) -> None:
+    from .report import WeeklyReport
 
-    cfg = {**DEFAULTS, **config.get("congress", {})}
-    source = QuiverSource() if cfg["source"] == "quiver" else make_capitol_source(cfg)
-    today = date.today()
-    disclosures = source.fetch(today)
-    print(f"Read {len(disclosures)} disclosures")
-
-    weights = {}
-    if cfg["use_track_records"] and os.getenv("ALPACA_API_KEY"):
-        from datetime import timedelta
-
-        from .broker import AlpacaBroker
-
-        broker = AlpacaBroker(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], dry_run=True,
-                              stock_feed=config.get("data", {}).get("stock_feed", "iex"))
-        tickers = sorted({d.ticker for d in disclosures if d.side == "buy"} | {"SPY"})
-        closes = broker.daily_closes(tickers, today - timedelta(days=int(cfg["history_days"]) + 10))
-        records = track_records(disclosures, PriceHistory(closes), today,
-                                {**TRACK_DEFAULTS, **(cfg.get("track_record") or {})})
-        weights = {n: r.weight for n, r in records.items()}
-        print("\nTop traders (buys vs S&P 500 from the disclosure date):")
-        for r in top_traders(records, n=15):
-            print(f"  {r.politician:<28} {r.avg_excess:+7.1%}  beat S&P {r.hit_rate:4.0%} of {r.scored_trades:>3} buys"
-                  f"  active trades {r.recent_trades:>3}  weight {r.weight:g}x")
-    else:
-        print("(no Alpaca keys found: ranking without track records)")
-
-    picks = rank(disclosures, today, int(cfg["lookback_days"]), int(cfg["max_trade_age_days"]),
-                 set(cfg["exclude"]), weights)
-    picks = [p for p in picks if p.score > 0 and len(p.buyers) >= int(cfg["min_buyers"])]
-    print(f"\n{'#':>3}  {'Ticker':<7} {'Score':>6}  Buyers  Sellers  Who's buying")
-    for i, p in enumerate(picks[:30], 1):
-        print(f"{i:>3}  {p.ticker:<7} {p.score:>6.1f}  {len(p.buyers):>6}  {len(p.sellers):>7}  {', '.join(p.buyers[:5])}")
-    if not picks:
-        print("No stock had enough different politicians buying it.")
+    broker, _ = make_broker(config, dry_run=True)
+    print(WeeklyReport(broker, PrintNotifier()).build())
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Alpaca wheel bot, choosing stocks from congressional trades")
+    parser = argparse.ArgumentParser(description="Alpaca options wheel bot")
     parser.add_argument("--config", default=os.getenv("BOT_CONFIG", "config.yaml"))
     parser.add_argument("--dry-run", action="store_true", help="log orders instead of placing them")
     parser.add_argument("--force", action="store_true", help="run even when the market is closed")
     parser.add_argument("--loop", action="store_true", help="run forever, every --interval minutes")
     parser.add_argument("--interval", type=int, default=5)
-    parser.add_argument("--picks", action="store_true", help="print the congress stock ranking and exit")
+    parser.add_argument("--picks", action="store_true", help="run the stock picker now, print the ranking, trade nothing")
+    parser.add_argument("--report", action="store_true", help="print the wheel report (cost basis, premiums) and exit")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -191,6 +171,9 @@ def main(argv=None) -> None:
 
     if args.picks:
         show_picks(config)
+        return
+    if args.report:
+        show_report(config)
         return
 
     if not args.loop:

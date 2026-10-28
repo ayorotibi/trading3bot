@@ -5,61 +5,102 @@ data:
   options_feed: indicative   # free Alpaca accounts; use "opra" if you pay for real-time options data
   stock_feed: iex            # free; use "sip" with a paid data plan
 
-# ---------------------------------------------------------------------------
-# Congress picks: chooses WHICH stocks the wheel trades
-# ---------------------------------------------------------------------------
-# Every trading day (first run after the market opens) the bot reads a year of
-# all politicians' disclosed trades, scores each politician on how their buys
-# did vs the S&P 500, then ranks stocks they bought in the last 30 days,
-# giving more weight to politicians with a good track record.
-congress:
+# ===========================================================================
+# STOCK PICKER: decides WHICH stocks the wheel trades (places no orders)
+# Refreshed once a day, on the first top-of-the-hour run after the market opens.
+# ===========================================================================
+picker:
   enabled: true
-  source: capitol_trades     # free, read from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
+  keep_picks: 30                 # how many ranked stocks to save for the wheel
+  min_price: 5.0                 # skip penny stocks
+  min_avg_dollar_volume: 20000000  # skip stocks trading under $20M a day (thin options)
+  require_uptrend: true          # drop stocks below their 200-day average
+  # Tickers never to pick. Leveraged/inverse ETFs are excluded because they can lose most of
+  # their value quickly, which is dangerous when selling puts. Add your own, e.g. GME.
+  exclude: [TQQQ, SQQQ, SOXL, SOXS, TSLL, TSLQ, TSLZ, NVDL, NVDU, NVDD, UVXY, UVIX, SVIX, VXX,
+            SPXL, SPXS, UPRO, SPXU, SDS, SSO, QLD, TNA, TZA, LABU, LABD, FAS, FAZ, YINN, YANG,
+            BITX, MSTU, MSTX, MSTZ, CONL, GGLL, AMDL, AAPU, METU, TECL, FNGU, FNGD, BOIL, KOLD]
 
-  lookback_days: 30          # stocks bought (disclosed) in the last 30 days are candidates
-  max_trade_age_days: 90     # ignore trades the politician made more than 90 days ago (late filings)
-  min_buyers: 2              # a stock needs at least 2 different politicians buying it
-  min_price: 5.0             # skip penny stocks
-  exclude: []                # tickers never to pick, e.g. [TSLA, GME]
+  # How much each source counts. Each is scaled 0-1 (best stock = 1) before blending.
+  weights:
+    congress: 1.0
+    insiders: 1.0
+    market: 0.5
+  multi_source_bonus: 0.25       # extra score when Congress AND insiders are both buying
 
-  use_track_records: true    # weight politicians by how well their past buys did
-  history_days: 365          # how much history to judge them on
-  track_record:
-    horizon_days: 90         # judge each buy on the 90 days after it was disclosed
-    min_scored_trades: 5     # fewer judged buys than this = neutral weight (1.0)
-    min_weight: 0.25         # worst traders count a quarter as much...
-    max_weight: 3.0          # ...best traders up to 3x
+  # Source 1: members of Congress (disclosed up to 45 days late)
+  congress:
+    enabled: true
+    source: capitol_trades       # free, read from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
+    lookback_days: 30            # disclosures from the last 30 days count towards the picks
+    max_trade_age_days: 90       # ignore trades made more than 90 days ago (very late filings)
+    min_buyers: 2                # at least 2 different politicians buying
+    use_track_records: true      # weight politicians by how their past buys did vs the S&P 500
+    history_days: 365
+    track_record:
+      horizon_days: 90           # judge each buy on the 90 days after it was disclosed
+      min_scored_trades: 5       # fewer judged buys than this = neutral weight
+      min_weight: 0.25
+      max_weight: 3.0
 
-  # Optional: also buy the top stocks outright. Off: the wheel does the trading.
-  buy_stocks: false
-  top_n: 10
-  budget_pct: 0.30
-  hold_rank: 15
+  # Source 2: company insiders buying their own stock (SEC Form 4, filed within 2 business days)
+  insiders:
+    enabled: true
+    lookback_days: 14            # purchases filed in the last 14 days
+    min_value: 25000             # ignore purchases under $25,000
+    cluster_bonus: 1.5           # 2+ different insiders buying the same stock
+    executive_bonus: 1.5         # CEO / CFO / COO / President / Chair buying
 
-# ---------------------------------------------------------------------------
-# The wheel (main strategy): sell cash-secured puts -> if assigned, sell
-# covered calls -> repeat
-# ---------------------------------------------------------------------------
+  # Source 3: live market data from Alpaca (trend and strength checks for every
+  # candidate; also adds today's most active stocks as candidates)
+  market:
+    most_actives: true
+    top: 50
+
+# ===========================================================================
+# THE WHEEL (main strategy): sell puts -> own shares -> sell calls -> repeat
+# ===========================================================================
 wheel:
   enabled: true
-  symbols_from_congress: true  # take stocks from the congress picks, best first
-  max_symbols: 5               # wheel up to 5 stocks at a time
-  # Each stock gets an equal slice of the cash budget (equity x max_cash_pct / max_symbols).
-  # With $100k, 50% and 5 stocks: $10k each, so stocks up to ~$100 a share can be wheeled.
-  # Picks too expensive for their slice, or with illiquid options, are skipped for the next one.
-  symbols: [F, SOFI, BAC]      # used before the first congress ranking exists, or if symbols_from_congress is false
+  symbols_from_picks: true       # trade the picker's stocks, best first
+  symbols: [F, SOFI, BAC]        # used only until the first picks exist (or if symbols_from_picks is false)
+  max_symbols: 5                 # stocks wheeled at once
+  defensive_max_symbols: 3       # ...fewer when the market turns defensive
+  max_cash_pct: 0.50             # max share of the account backing puts, split equally between stocks
   contracts_per_symbol: 1
 
-  target_dte: 30          # aim for expiries about 30 days out...
-  min_dte: 21             # ...but only between 21
-  max_dte: 45             # and 45 days
-  put_target_delta: 0.30  # ~30% chance of finishing in the money (being assigned)
-  call_target_delta: 0.30
-  otm_pct_if_no_delta: 0.05  # fallback when the data feed has no greeks: 5% out of the money
+  # --- choosing the contract ---
+  target_dte: 30                 # aim for expiries ~30 days out (21-45)
+  min_dte: 21
+  max_dte: 45
+  put_target_delta: 0.30         # starting point; the bot adapts it:
+  call_target_delta: 0.30        #   -0.05 if the stock is below its 50-day average (puts)
+  delta_step: 0.05               #   -0.05 in a defensive market (puts) / +0.05 (calls)
+  min_delta: 0.10                #   -0.05 when premiums are rich: implied vol >= 1.3x realised (puts)
+  rich_iv_ratio: 1.3             #   -0.05 for calls in a strong uptrend (room to rise)
+  put_min_annual_yield: 0.10     # a put must pay at least 10%/yr on the cash it ties up
+  call_min_annual_yield: 0.04    # a call must pay at least 4%/yr on the shares
+  prefer_support: true           # puts prefer strikes at/below the 20-day low
+  min_premium: 0.10              # ignore contracts paying under $0.10/share
+  max_spread_pct: 0.30           # skip contracts with wide bid/ask spreads
+  call_floor: adjusted           # covered calls never below: "adjusted" cost basis (after premiums) or "purchase" price
 
-  min_premium: 0.10       # ignore contracts paying less than $0.10/share ($10/contract)
-  max_spread_pct: 0.30    # skip illiquid contracts with wide bid/ask spreads
-  take_profit_pct: 0.50   # buy back early once 50% of the premium is captured (0 = hold to expiry)
-  calls_never_below_cost_basis: true  # never sell a call that would lock in a loss on assignment
-  max_cash_pct: 0.50      # at most 50% of account equity tied up securing puts (raise to use more)
-  reprice_after_minutes: 30  # cancel and re-price unfilled orders after this long
+  # --- earnings & events ---
+  avoid_earnings: true           # choose expiries that end BEFORE the next earnings (needs FINNHUB_API_KEY)
+  earnings_min_dte: 7            # ...allowing expiries as short as 7 days to do that
+  earnings_close_days: 2         # close a contract 2 days before earnings...
+  earnings_close_profit_pct: 0.25  # ...if it has at least 25% profit
+  ex_div_days: 2                 # check covered calls for early assignment 2 days before ex-dividend
+  blackout_dates: []             # no NEW positions on these days, e.g. ["2026-12-09"] for a Fed decision
+
+  # --- managing open contracts ---
+  take_profit_pct: 0.50          # buy back once 50% of the premium is captured
+  close_cheap_at: 0.05           # buy back at $0.05 or less to free the cash early
+  manage_dte: 7                  # with 7 days or less left, decide: roll, let expire, or accept assignment
+  tested_buffer: 0.02            # "approaching the strike" = within 2%
+  deep_itm_pct: 0.05             # a put 5%+ in the money gets rolled rather than assigned
+  max_rolls: 3                   # roll the same stock at most 3 times (in 120 days), then accept the outcome
+  min_roll_credit: 0.05          # only roll if the new contract pays at least $0.05/share more than closing
+  roll_min_dte: 14
+  roll_max_dte: 45
+  reprice_after_minutes: 30      # cancel and re-price unfilled orders after this long

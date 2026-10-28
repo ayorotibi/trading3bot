@@ -21,8 +21,11 @@ class FakeBroker:
         self.assets: dict[str, dict] = {}
         self.picks = None
         self.picks_date = None
-        self.closes: dict = {}
-        self.holdings: dict[str, float] = {}  # shares owned by the congress strategy ("cr-")
+        self.bars: dict = {}          # {symbol: [(date, close, volume)]}
+        self.actives: list[str] = []
+        self.dividends: dict = {}     # {symbol: (ex_date, cash)}
+        self.activities: list[dict] = []
+        self.filled: list[dict] = []  # [{"symbol", "coid", ...}] for filled_orders()
 
     # broker API used by strategies
     def market_is_open(self):
@@ -43,9 +46,6 @@ class FakeBroker:
     def asset_info(self, symbol):
         return self.assets.get(symbol, {"tradable": True, "fractionable": True})
 
-    def strategy_holdings(self, prefix):
-        return dict(self.holdings) if prefix == "cr-" else {}
-
     def load_picks(self, name="Congress Picks"):
         return None if self.picks is None else list(self.picks)
 
@@ -56,8 +56,26 @@ class FakeBroker:
     def picks_updated_on(self, name="Congress Picks"):
         return self.picks_date
 
+    def daily_bars(self, symbols, start):
+        return {s: v for s, v in self.bars.items() if s in symbols}
+
     def daily_closes(self, symbols, start):
-        return {s: v for s, v in self.closes.items() if s in symbols}
+        return {s: [(d, c) for d, c, *_ in v] for s, v in self.daily_bars(symbols, start).items()}
+
+    def most_actives(self, top=50):
+        return list(self.actives)
+
+    def upcoming_dividends(self, symbols, days=45):
+        return {s: v for s, v in self.dividends.items() if s in symbols}
+
+    def account_activities(self, days=400):
+        return list(self.activities)
+
+    def filled_orders(self, prefix, days=30):
+        return [o for o in self.filled if o["coid"].startswith(prefix)]
+
+    def portfolio_change(self, period="1W"):
+        return None
 
     def latest_price(self, symbol):
         return self.prices[symbol]
@@ -92,14 +110,14 @@ class FakeBroker:
         self.cancelled.append(order_id)
 
     # helpers for building scenarios
-    def add_chain(self, underlying, type_, today: date, dte: int, strikes_deltas_bids, spread=0.04):
+    def add_chain(self, underlying, type_, today: date, dte: int, strikes_deltas_bids, spread=0.04, iv=None):
         expiry = today + timedelta(days=dte)
         for strike, delta, bid in strikes_deltas_bids:
             self.chains.setdefault((underlying, type_), []).append(
                 OptionQuote(
                     symbol=occ.build(underlying, expiry, type_, strike),
                     underlying=underlying, type=type_, strike=strike, expiry=expiry,
-                    bid=bid, ask=bid + spread, delta=delta,
+                    bid=bid, ask=bid + spread, delta=delta, iv=iv,
                 )
             )
         return expiry

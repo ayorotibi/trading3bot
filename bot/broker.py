@@ -46,6 +46,8 @@ from .models import Account, OpenOrder, OptionQuote, Position
 
 log = logging.getLogger(__name__)
 
+PICKS_WATCHLIST = "Wheel Picks"
+
 
 def _f(value, default: float = 0.0) -> float:
     try:
@@ -70,6 +72,7 @@ class AlpacaBroker:
     ):
         self.paper = paper
         self.dry_run = dry_run
+        self._key, self._secret = api_key, secret_key
         self.trading = TradingClient(api_key, secret_key, paper=paper)
         self.stock_data = StockHistoricalDataClient(api_key, secret_key)
         self.option_data = OptionHistoricalDataClient(api_key, secret_key)
@@ -140,15 +143,10 @@ class AlpacaBroker:
             return None
         return {"tradable": bool(a.tradable), "fractionable": bool(a.fractionable)}
 
-    def strategy_holdings(self, prefix: str, days: int = 730) -> dict[str, float]:
-        """Net shares bought minus sold by orders whose client_order_id starts with prefix.
-
-        Alpaca's order history is the bot's memory: it tells us which shares
-        belong to which strategy, with no database needed.
-        """
-        out: dict[str, float] = defaultdict(float)
-        seen: set[str] = set()
+    def filled_orders(self, prefix: str, days: int = 30) -> list[dict]:
+        """Orders (any status) with fills, whose client_order_id starts with prefix."""
         after = datetime.now(timezone.utc) - timedelta(days=days)
+        out, seen = [], set()
         while True:
             batch = self.trading.get_orders(
                 GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500, after=after, direction=Sort.ASC)
@@ -156,15 +154,13 @@ class AlpacaBroker:
             new = [o for o in batch if str(o.id) not in seen]
             for o in new:
                 seen.add(str(o.id))
-                if not (o.client_order_id or "").startswith(prefix):
-                    continue
-                filled = _f(o.filled_qty)
-                if filled:
-                    out[o.symbol] += filled if _enum_value(o.side) == "buy" else -filled
+                if (o.client_order_id or "").startswith(prefix) and _f(o.filled_qty) > 0:
+                    out.append({"symbol": o.symbol, "coid": o.client_order_id, "filled_at": o.filled_at,
+                                "price": _f(o.filled_avg_price), "qty": _f(o.filled_qty), "side": _enum_value(o.side)})
             if len(batch) < 500 or not new:
                 break
             after = max(o.submitted_at or o.created_at for o in batch)
-        return {s: round(q, 9) for s, q in out.items() if abs(q) > 1e-9}
+        return out
 
     # ---- saved stock picks (an Alpaca watchlist) --------------------------
     def _find_watchlist(self, name: str):
@@ -173,8 +169,8 @@ class AlpacaBroker:
                 return w
         return None
 
-    def load_picks(self, name: str = "Congress Picks") -> Optional[list[str]]:
-        """Ranked symbols saved by the congress strategy, or None if never saved."""
+    def load_picks(self, name: str = PICKS_WATCHLIST) -> Optional[list[str]]:
+        """Ranked symbols saved by the stock picker, or None if never saved."""
         if self._picks_cache is not None:
             return list(self._picks_cache)
         w = self._find_watchlist(name)
@@ -183,7 +179,7 @@ class AlpacaBroker:
         full = self.trading.get_watchlist_by_id(w.id)
         return [a.symbol for a in (full.assets or [])]
 
-    def picks_updated_on(self, name: str = "Congress Picks") -> Optional[date]:
+    def picks_updated_on(self, name: str = PICKS_WATCHLIST) -> Optional[date]:
         """UTC date the picks were last refreshed, or None if never."""
         if self._picks_saved_on is not None:
             return self._picks_saved_on
@@ -193,7 +189,7 @@ class AlpacaBroker:
         ts = w.updated_at or w.created_at
         return ts.astimezone(timezone.utc).date() if ts else None
 
-    def save_picks(self, symbols: list[str], name: str = "Congress Picks") -> None:
+    def save_picks(self, symbols: list[str], name: str = PICKS_WATCHLIST) -> None:
         self._picks_cache = list(symbols)
         self._picks_saved_on = datetime.now(timezone.utc).date()
         if self.dry_run:
@@ -215,9 +211,10 @@ class AlpacaBroker:
         )
         return _f(res[symbol].price)
 
-    def daily_closes(self, symbols: list[str], start: date) -> dict[str, list[tuple[date, float]]]:
-        """Split- and dividend-adjusted daily closes, fetched 100 symbols at a time."""
-        out: dict[str, list[tuple[date, float]]] = {}
+    def daily_bars(self, symbols: list[str], start: date) -> dict[str, list[tuple[date, float, float]]]:
+        """Split- and dividend-adjusted daily (date, close, volume), 100 symbols per request."""
+        out: dict[str, list[tuple[date, float, float]]] = {}
+        symbols = sorted(set(symbols))
         for i in range(0, len(symbols), 100):
             batch = symbols[i : i + 100]
             try:
@@ -234,8 +231,82 @@ class AlpacaBroker:
                 log.warning("Price history batch %d failed: %s", i // 100 + 1, exc)
                 continue
             for sym, rows in (bars.data or {}).items():
-                out[sym] = [(b.timestamp.date(), _f(b.close)) for b in rows if b.close]
+                out[sym] = [(b.timestamp.date(), _f(b.close), _f(b.volume)) for b in rows if b.close]
         return out
+
+    def daily_closes(self, symbols: list[str], start: date) -> dict[str, list[tuple[date, float]]]:
+        return {s: [(d, c) for d, c, _ in rows] for s, rows in self.daily_bars(symbols, start).items()}
+
+    def most_actives(self, top: int = 50) -> list[str]:
+        """Alpaca's most actively traded stocks today, (by volume), or [] if unavailable."""
+        try:
+            from alpaca.data.historical.screener import ScreenerClient
+            from alpaca.data.requests import MostActivesRequest
+
+            res = ScreenerClient(self._key, self._secret).get_most_actives(MostActivesRequest(top=top))
+            return [m.symbol for m in (res.most_actives or [])]
+        except Exception as exc:
+            log.warning("Most-actives screener unavailable: %s", exc)
+            return []
+
+    def upcoming_dividends(self, symbols: list[str], days: int = 45) -> dict[str, tuple[date, float]]:
+        """Next ex-dividend date and cash amount per symbol, within `days`."""
+        if not symbols:
+            return {}
+        from alpaca.trading.enums import CorporateActionDateType, CorporateActionType
+        from alpaca.trading.requests import GetCorporateAnnouncementsRequest
+
+        today = datetime.now(timezone.utc).date()
+        out: dict[str, tuple[date, float]] = {}
+        try:
+            anns = self.trading.get_corporate_announcements(
+                GetCorporateAnnouncementsRequest(
+                    ca_types=[CorporateActionType.DIVIDEND], since=today, until=today + timedelta(days=days),
+                    date_type=CorporateActionDateType.EX_DATE,
+                )
+            )
+        except Exception as exc:
+            log.warning("Dividend calendar unavailable: %s", exc)
+            return {}
+        wanted = set(symbols)
+        for a in anns or []:
+            sym = a.initiating_symbol or a.target_symbol
+            if sym in wanted and a.ex_date and (sym not in out or a.ex_date < out[sym][0]):
+                out[sym] = (a.ex_date, _f(a.cash))
+        return out
+
+    def account_activities(self, days: int = 400) -> list[dict]:
+        """Fills, option assignments/expiries and assignment stock trades, oldest first."""
+        after = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out: list[dict] = []
+        token = None
+        for _ in range(200):
+            params = {
+                "activity_types": "FILL,OPASN,OPEXP,OPEXC,OPTRD",
+                "after": after,
+                "direction": "asc",
+                "page_size": 100,
+            }
+            if token:
+                params["page_token"] = token
+            page = self.trading.get("/account/activities", params) or []
+            out.extend(page)
+            if len(page) < 100:
+                break
+            token = page[-1].get("id")
+        return out
+
+    def portfolio_change(self, period: str = "1W") -> Optional[tuple[float, float]]:
+        """(start equity, end equity) over the period, or None."""
+        try:
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+            h = self.trading.get_portfolio_history(GetPortfolioHistoryRequest(period=period, timeframe="1D"))
+            eq = [e for e in (h.equity or []) if e]
+            return (eq[0], eq[-1]) if len(eq) >= 2 else None
+        except Exception as exc:
+            log.warning("Portfolio history unavailable: %s", exc)
+            return None
 
     def option_chain(
         self,
@@ -275,6 +346,7 @@ class AlpacaBroker:
                     bid=_f(q.bid_price),
                     ask=_f(q.ask_price),
                     delta=_f(snap.greeks.delta, None) if snap.greeks else None,
+                    iv=_f(snap.implied_volatility, None),
                 )
             )
         return out

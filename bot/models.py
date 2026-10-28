@@ -46,6 +46,7 @@ class OptionQuote:
     bid: float
     ask: float
     delta: Optional[float] = None
+    iv: Optional[float] = None  # implied volatility, e.g. 0.45 = 45%/yr
 
     @property
     def mid(self) -> float:

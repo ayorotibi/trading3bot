@@ -32,8 +32,9 @@ LABELS = {
     "wh-put": "Wheel · sell put",
     "wh-call": "Wheel · covered call",
     "wh-tp": "Wheel · take profit",
-    "cr-buy": "Congress · buy",
-    "cr-sell": "Congress · sell",
+    "wh-bc": "Wheel · buy back",
+    "wh-rc": "Wheel · roll (close)",
+    "wh-ro": "Wheel · roll (open)",
 }
 
 
@@ -76,16 +77,51 @@ class Data:
         self.client = TradingClient(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=paper)
         self.tz = ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Europe/London"))
 
+    def _ledger_rows(self) -> str:
+        from .ledger import build_ledger
+
+        try:
+            from datetime import datetime, timedelta
+
+            after = (datetime.now(timezone.utc) - timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            acts, token = [], None
+            for _ in range(50):
+                params = {"activity_types": "FILL,OPASN,OPEXP,OPEXC,OPTRD", "after": after,
+                          "direction": "asc", "page_size": 100}
+                if token:
+                    params["page_token"] = token
+                page = self.client.get("/account/activities", params) or []
+                acts.extend(page)
+                if len(page) < 100:
+                    break
+                token = page[-1].get("id")
+            books = build_ledger(acts)
+        except Exception as exc:
+            log.warning("Ledger unavailable: %s", exc)
+            return ""
+        rows = []
+        for b in sorted(books.values(), key=lambda b: -b.total_premium):
+            if not (b.completed or b.current):
+                continue
+            rows.append(
+                f"<tr><td><b>{html.escape(b.ticker)}</b></td><td>{b.shares:g}</td>"
+                f"<td>{_money(b.avg_cost) if b.avg_cost else '—'}</td>"
+                f"<td>{_money(b.adjusted_basis) if b.adjusted_basis else '—'}</td>"
+                f"<td>{_money(b.total_premium)}</td><td>{len(b.completed)} · {_money(b.realized_profit)}</td></tr>"
+            )
+        return "".join(rows)
+
     def render(self, show_all: bool) -> str:
         acct = self.client.get_account()
         orders = self.client.get_orders(GetOrdersRequest(status=QueryOrderStatus.ALL, limit=300, direction="desc"))
         if not show_all:
             orders = [o for o in orders if strategy_label(o.client_order_id) != "Other / manual"]
         positions = self.client.get_all_positions()
+        ledger_rows = self._ledger_rows()
         clock = self.client.get_clock()
         picks = []
         for w in self.client.get_watchlists():
-            if w.name == "Congress Picks":
+            if w.name == "Wheel Picks":
                 picks = [a.symbol for a in (self.client.get_watchlist_by_id(w.id).assets or [])]
 
         rows = []
@@ -125,6 +161,7 @@ class Data:
             orders="".join(rows) or empty,
             positions="".join(pos_rows) or no_pos,
             toggle=toggle,
+            ledger=ledger_rows or "<tr><td colspan='6' class='empty'>No wheel cycles yet</td></tr>",
             picks=" ".join(f"<span class='pick'><small>{i}</small> {html.escape(sym)}</span>"
                            for i, sym in enumerate(picks[:15], 1))
             or "<span class='muted'>No ranking yet — it is created on the first run during market hours</span>",
@@ -166,10 +203,12 @@ a{{color:var(--accent)}} .muted{{color:var(--muted);font-size:13px}}
 <div class="stat"><small>Cash</small><b>{cash}</b></div>
 <div class="stat"><small>Options buying power</small><b>{obp}</b></div>
 </div>
-<h2>Congress picks <span class="muted">· the wheel chooses from these, best first</span></h2>
+<h2>Wheel picks <span class="muted">· from Congress, insiders &amp; market data, best first</span></h2>
 <div class="picks">{picks}</div>
 <h2>Positions</h2>
 <div class="wrap"><table><tr><th>Holding</th><th>Qty</th><th>Avg price</th><th>Now</th><th>Unrealised P/L</th></tr>{positions}</table></div>
+<h2>Wheel ledger <span class="muted">· cost basis after premiums, across all cycles</span></h2>
+<div class="wrap"><table><tr><th>Stock</th><th>Shares</th><th>Bought at</th><th>Adjusted basis</th><th>Premium collected</th><th>Cycles done · profit</th></tr>{ledger}</table></div>
 <h2>Orders <span class="muted">· {toggle}</span></h2>
 <div class="wrap"><table><tr><th>Time</th><th>Strategy</th><th>Contract / stock</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>{orders}</table></div>
 <p class="muted">Negative quantities are options you sold. Full run-by-run logs are in the Render dashboard → cron job → Logs.</p>

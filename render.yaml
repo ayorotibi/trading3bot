@@ -30,6 +30,8 @@ services:
         sync: false
       - key: QUIVER_API_TOKEN
         sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
       - key: DRY_RUN
         value: "false"
       - key: PYTHON_VERSION
