@@ -124,7 +124,7 @@ def test_weekly_refresh_then_cached_ranking_on_other_days():
     s = StockPicker(b, {}, MemoryNotifier(), src, ListSource([]))
     picks = s.run(NOW)
     assert [c.ticker for c in picks] == ["GOOD", "BAD"]         # track records beat a bigger crowd
-    assert b.other_lists["Congress Picks"][0] == ["GOOD", "BAD"] and src.calls == 1
+    assert b.other_lists["Congress Picks v2"][0] == ["GOOD", "BAD"] and src.calls == 1
     assert "Congress refreshed" in s.notify.messages[0] and "credits left: 5,000" in s.notify.messages[0]
 
     # next day: no API call, same Congress order from the cache
@@ -141,9 +141,26 @@ def test_weekly_refresh_then_cached_ranking_on_other_days():
 
 def test_failed_refresh_falls_back_to_last_weeks_ranking():
     b = healthy_broker("OLD")
-    b.other_lists["Congress Picks"] = (["OLD"], TODAY - timedelta(days=9))
+    b.other_lists["Congress Picks v2"] = (["OLD"], TODAY - timedelta(days=9))
     s = StockPicker(b, {}, MemoryNotifier(), WeeklySource([], fail=True), ListSource([]))
     picks = s.run(NOW)
     assert [c.ticker for c in picks] == ["OLD"] and b.incomplete
     msg = s.notify.messages[0]
     assert "out of credits" in msg and "last week's Congress ranking" in msg
+
+
+def test_rejected_page_size_steps_down(monkeypatch):
+    people = [{"id": i, "name": f"P{i}", "alpha": 0.1, "trade_count": 20} for i in range(150)]
+    calls = fake_get(monkeypatch, [Resp(422), Resp(422), Resp(422), Resp(200, people[:100]),
+                                   Resp(200, people[100:], {"X-Credits-Remaining": "5100"})])
+    src = DisclosedCapitolSource(api_key="k")
+    w = src.politician_weights()
+    assert len([k for k in w if not k.startswith("id:")]) == 150 and src.credits_left == 5100
+    assert [c[1].get("limit") for c in calls] == [1000, 500, 250, 100, 100]
+    assert calls[-1][1]["offset"] == 100
+
+
+def test_no_paging_params_as_last_resort(monkeypatch):
+    calls = fake_get(monkeypatch, [Resp(422)] * 5 + [Resp(200, [{"name": "A", "alpha": 0.2}])])
+    assert DisclosedCapitolSource(api_key="k").politician_weights()["A"] > 1
+    assert calls[-1][1] == {}

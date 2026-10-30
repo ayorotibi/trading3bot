@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 API = "https://api.disclosedcapitol.com"
 PAGE = 1000
+PAGE_SIZES = (1000, 500, 250, 100, 50)
 
 
 def _date(value) -> Optional[date]:
@@ -131,32 +132,52 @@ class DisclosedCapitolSource:
         self.partial = False
         self._sleep = time.sleep
 
+    def _request(self, path: str, params: dict):
+        for attempt in range(3):
+            resp = requests.get(f"{API}{path}", headers={"DC-API-Key": self.key}, params=params, timeout=self.timeout)
+            if resp.status_code == 429 and attempt < 2:
+                ra = resp.headers.get("Retry-After", "")
+                self._sleep(min(float(ra) if ra.isdigit() else 30, 120))
+                continue
+            break
+        if resp.status_code == 402:
+            raise RuntimeError("Disclosed Capitol: out of credits (HTTP 402)")
+        if resp.status_code == 403:
+            raise RuntimeError("Disclosed Capitol: API key missing or invalid (HTTP 403)")
+        return resp
+
     def _get(self, path: str, params: dict) -> list[dict]:
-        out, offset = [], 0
+        """All rows, paging with limit/offset.
+
+        Endpoints allow different page sizes, and a rejected size returns 422
+        (failed calls cost no credits), so it steps down until one is accepted.
+        If every size is rejected it tries once with no paging parameters.
+        """
+        sizes = [s for s in PAGE_SIZES if s <= PAGE]
+        out, offset, i = [], 0, 0
         while True:
-            for attempt in range(3):
-                resp = requests.get(f"{API}{path}", headers={"DC-API-Key": self.key},
-                                    params={**params, "limit": PAGE, "offset": offset}, timeout=self.timeout)
-                if resp.status_code == 429 and attempt < 2:
-                    ra = resp.headers.get("Retry-After", "")
-                    self._sleep(min(float(ra) if ra.isdigit() else 30, 120))
-                    continue
-                break
-            if resp.status_code == 402:
-                raise RuntimeError("Disclosed Capitol: out of credits (HTTP 402)")
-            if resp.status_code == 403:
-                raise RuntimeError("Disclosed Capitol: API key missing or invalid (HTTP 403)")
+            if i < len(sizes):
+                size = sizes[i]
+                resp = self._request(path, {**params, "limit": size, "offset": offset})
+            else:
+                size = None
+                resp = self._request(path, params)
+            if resp.status_code == 422 and size is not None and offset == 0:
+                log.info("Disclosed Capitol %s: page size %d rejected (%s), trying smaller",
+                         path, size, getattr(resp, "text", "")[:200])
+                i += 1
+                continue
             resp.raise_for_status()
             left = resp.headers.get("X-Credits-Remaining")
             if left and left.lstrip("-").isdigit():
                 self.credits_left = int(left)
             page = resp.json()
             if isinstance(page, dict):  # tolerate a wrapped response
-                page = page.get("data") or page.get("results") or []
+                page = page.get("data") or page.get("results") or page.get("politicians") or []
             out.extend(page)
-            if len(page) < PAGE:
+            if size is None or len(page) < size:
                 return out
-            offset += PAGE
+            offset += size
 
     def fetch(self, today: Optional[date] = None) -> list[Disclosure]:
         if not self.key:

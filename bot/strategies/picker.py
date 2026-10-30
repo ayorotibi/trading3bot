@@ -51,7 +51,7 @@ DEFAULTS = {
     "market": {"most_actives": True, "top": 50},
 }
 
-CONGRESS_CACHE = "Congress Picks"
+CONGRESS_CACHE = "Congress Picks v2"  # renamed 30 Oct to force a refresh with politician weights
 EXECUTIVE_TITLES = ("CEO", "CFO", "COO", "PRES", "CHAIR", "CHIEF")
 
 
