@@ -65,7 +65,16 @@ def make_picker(config: dict, broker, notifier, reporter=None):
     pcfg = config.get("picker", {})
     ccfg = pcfg.get("congress", {})
     icfg = {**DEFAULTS["insiders"], **(pcfg.get("insiders") or {})}
-    congress_source = QuiverSource() if ccfg.get("source") == "quiver" else make_capitol_source(ccfg)
+    source = ccfg.get("source", "disclosed_capitol")
+    if source == "quiver":
+        congress_source = QuiverSource()
+    elif source == "capitol_trades":
+        congress_source = make_capitol_source(ccfg)
+    else:
+        from .sources.disclosed_capitol import DisclosedCapitolSource
+
+        congress_source = DisclosedCapitolSource(days=int(ccfg.get("lookback_days", 30)),
+                                                 refresh_days=int(ccfg.get("refresh_days", 7)))
     insider_source = OpenInsiderSource(lookback_days=int(icfg["lookback_days"]), min_value=float(icfg["min_value"]))
     return StockPicker(broker, pcfg, notifier, congress_source, insider_source, reporter)
 

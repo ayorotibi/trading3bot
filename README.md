@@ -25,7 +25,7 @@ On the first top-of-the-hour run after the market opens (retried hourly if a sou
 
 | Source | What it measures | How fresh |
 |---|---|---|
-| **Congress** — [Capitol Trades](https://www.capitoltrades.com/trades) | Stocks members of Congress bought in the last 30 days. Each politician is scored on a year of their buys vs the S&P 500 (from the day each was *disclosed*); successful traders count up to 3×, poor ones as little as 0.25×. Needs 2+ different politicians buying | Up to 45 days late |
+| **Congress** — [Disclosed Capitol API](https://www.disclosedcapitol.com/developers) | Stocks members of Congress bought in the last 30 days. Each politician is weighted by their track record (Disclosed Capitol's alpha vs the market): successful traders count up to 3×, poor ones as little as 0.25×. Needs 2+ different politicians buying. Refreshed **weekly** to stay within the $6/month plan's credits; the ranking is kept in the Alpaca watchlist "Congress Picks" in between | Up to 45 days late (the law allows it) |
 | **Insiders** — SEC Form 4 via [OpenInsider](http://openinsider.com) | Company officers and directors buying their own stock with their own money in the last 14 days (≥ $25k). Several insiders buying ("cluster buys") or the CEO/CFO buying counts 1.5× | Filed within 2 business days |
 | **Market** — Alpaca prices | Trend (vs 50- and 200-day averages) and 3-month strength vs the S&P 500 for every candidate. Also adds today's most active stocks, so there are always fresh ideas even if the other sites fail | Live |
 
@@ -86,7 +86,11 @@ There is no database: everything is worked out from your Alpaca positions, order
 **Discord**
 1. In a server you own: channel **Settings → Integrations → Webhooks → New Webhook → Copy URL** → `DISCORD_WEBHOOK_URL`.
 
-## 3. Get a free Finnhub key (earnings dates)
+## 3. Get a Disclosed Capitol key (Congress trades)
+
+Sign up at [disclosedcapitol.com](https://www.disclosedcapitol.com/developers), start the **Core** plan ($6/month, 7-day free trial, 7,500 credits a month), then **Account → API Keys → Generate** → `DISCLOSED_CAPITOL_API_KEY`. A weekly refresh uses roughly 1,000–1,600 credits; the morning Telegram message shows how many are left.
+
+## 3b. Get a free Finnhub key (earnings dates)
 
 Sign up at [finnhub.io](https://finnhub.io) → **Get free API key**, and copy it → `FINNHUB_API_KEY`. Without it the wheel can't see earnings dates and won't avoid them (it says so in the logs).
 
@@ -99,6 +103,7 @@ Sign up at [finnhub.io](https://finnhub.io) → **Get free API key**, and copy i
    - `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` — asked for **twice** (once per service); enter the same paper keys both times
    - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (and/or `DISCORD_WEBHOOK_URL`)
    - `FINNHUB_API_KEY`
+   - `DISCLOSED_CAPITOL_API_KEY`
    - `DASHBOARD_PASSWORD` — make one up, 8+ characters
    - Leave `QUIVER_API_TOKEN` blank unless you use Quiver.
 3. Click **Apply**, then open the `trade-log` service URL and log in with any username plus your `DASHBOARD_PASSWORD`.
@@ -148,7 +153,8 @@ Everything is explained in the file. The ones you're most likely to change:
 | `wheel.max_rolls` | `3` | Rolls per stock before accepting assignment / call-away |
 | `picker.weights` | `1 / 1 / 0.5` | How much Congress, insiders and market data count |
 | `picker.require_uptrend` | `true` | Drop stocks below their 200-day average |
-| `picker.congress.source` | `capitol_trades` | Or `quiver` for Quiver Quantitative's paid API (~$30/month), more reliable |
+| `picker.congress.source` | `disclosed_capitol` | Or `quiver` (Quiver Quantitative, $30/month) or `capitol_trades` (free, but blocks Render with HTTP 429) |
+| `picker.congress.refresh_days` | `7` | How often to re-read Congress trades from Disclosed Capitol (each refresh costs credits) |
 | `picker.insiders.min_value` | `25000` | Smallest insider purchase that counts |
 | `picker.exclude` | `[]` | Tickers never to pick |
 
@@ -166,7 +172,8 @@ Without step 3 the bot refuses to start in live mode. The trade log page shows a
 
 ## Known limitations
 
-- **Capitol Trades and OpenInsider have no official APIs.** If either blocks Render or changes its layout, that source is skipped and the daily Telegram summary says so; the others keep working. For Congress, `source: quiver` is the paid, reliable alternative.
+- **OpenInsider has no official API.** If it blocks Render or changes its layout, the insider source is skipped and the daily Telegram summary says so; the others keep working. (Capitol Trades, the original free Congress source, blocked Render with HTTP 429, which is why Disclosed Capitol is the default.)
+- **Disclosed Capitol credits:** if they run out (HTTP 402) the bot keeps using last week's Congress ranking and says so in Telegram.
 - **Free option data is indicative**, and greeks/implied volatility may sometimes be missing; the bot then falls back to 5% out of the money. `options_feed: opra` needs Alpaca's paid data plan.
 - **Earnings dates need `FINNHUB_API_KEY`.** Without it, earnings aren't avoided.
 - **Macro events** (Fed, CPI) aren't detected automatically; list them in `blackout_dates`.
@@ -182,7 +189,8 @@ bot/strategies/picker.py        daily stock picker (blends the three sources)
 bot/strategies/congress.py      Congress scoring
 bot/strategies/politicians.py   politician track records
 bot/strategies/wheel.py         the wheel: contract choice, management, rolls
-bot/sources/capitol_trades.py   capitoltrades.com reader
+bot/sources/disclosed_capitol.py Disclosed Capitol API (Congress, default)
+bot/sources/capitol_trades.py   capitoltrades.com reader (free alternative)
 bot/sources/openinsider.py      SEC Form 4 insider purchases (OpenInsider)
 bot/sources/quiver.py           Quiver Quantitative API (optional)
 bot/market.py                   trend, volatility, support, market regime

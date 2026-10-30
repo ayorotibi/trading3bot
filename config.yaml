@@ -31,11 +31,16 @@ picker:
   # Source 1: members of Congress (disclosed up to 45 days late)
   congress:
     enabled: true
-    source: capitol_trades       # free, read from capitoltrades.com. Or "quiver" (needs QUIVER_API_TOKEN)
+    source: disclosed_capitol    # Disclosed Capitol API (needs DISCLOSED_CAPITOL_API_KEY, $6/month Core plan)
+                                 # alternatives: "quiver" (QUIVER_API_TOKEN, $30/month) or "capitol_trades"
+                                 # (free, but it blocks Render's servers with HTTP 429)
+    refresh_days: 7              # Disclosed Capitol: refresh weekly (~1,000-1,600 credits); the ranking is
+                                 # kept in the Alpaca watchlist "Congress Picks" in between
     lookback_days: 30            # disclosures from the last 30 days count towards the picks
     max_trade_age_days: 90       # ignore trades made more than 90 days ago (very late filings)
     min_buyers: 2                # at least 2 different politicians buying
-    use_track_records: true      # weight politicians by how their past buys did vs the S&P 500
+    use_track_records: true      # weight politicians by their past performance vs the market
+                                 # (Disclosed Capitol's alpha; for other sources, measured from prices)
     history_days: 180             # how far back to judge politicians (fewer pages = less throttling)
     track_record:
       horizon_days: 90           # judge each buy on the 90 days after it was disclosed

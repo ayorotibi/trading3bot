@@ -22,7 +22,8 @@ log = logging.getLogger(__name__)
 
 DEFAULTS = {
     "enabled": True,
-    "source": "capitol_trades",
+    "source": "disclosed_capitol",
+    "refresh_days": 7,
     "lookback_days": 30,
     "max_trade_age_days": 90,
     "history_days": 180,

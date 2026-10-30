@@ -21,6 +21,8 @@ class FakeBroker:
         self.assets: dict[str, dict] = {}
         self.picks = None
         self.picks_date = None
+        self.other_lists: dict = {}   # other watchlists: {name: (symbols, date saved)}
+        self.today_date = date(2026, 10, 28)
         self.bars: dict = {}          # {symbol: [(date, close, volume)]}
         self.actives: list[str] = []
         self.dividends: dict = {}     # {symbol: (ex_date, cash)}
@@ -49,10 +51,16 @@ class FakeBroker:
     def asset_info(self, symbol):
         return self.assets.get(symbol, {"tradable": True, "fractionable": True})
 
-    def load_picks(self, name="Congress Picks"):
+    def load_picks(self, name="Wheel Picks"):
+        if name != "Wheel Picks":
+            v = self.other_lists.get(name)
+            return None if v is None else list(v[0])
         return None if self.picks is None else list(self.picks)
 
-    def save_picks(self, symbols, name="Congress Picks"):
+    def save_picks(self, symbols, name="Wheel Picks"):
+        if name != "Wheel Picks":
+            self.other_lists[name] = (list(symbols), self.today_date)
+            return
         self.picks = list(symbols)
         self.picks_date = "saved"
 
@@ -62,7 +70,10 @@ class FakeBroker:
     def mark_picks_incomplete(self, incomplete):
         self.incomplete = incomplete
 
-    def picks_updated_on(self, name="Congress Picks"):
+    def picks_updated_on(self, name="Wheel Picks"):
+        if name != "Wheel Picks":
+            v = self.other_lists.get(name)
+            return None if v is None else v[1]
         return self.picks_date
 
     def daily_bars(self, symbols, start):

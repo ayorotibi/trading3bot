@@ -78,8 +78,8 @@ class AlpacaBroker:
         self.option_data = OptionHistoricalDataClient(api_key, secret_key)
         self.options_feed = OptionsFeed(options_feed)
         self.stock_feed = DataFeed(stock_feed)
-        self._picks_cache: Optional[list[str]] = None
-        self._picks_saved_on: Optional[date] = None
+        self._picks_cache: dict[str, list[str]] = {}
+        self._picks_saved_on: dict[str, date] = {}
         self._incomplete_cache: Optional[bool] = None
 
     # ---- account & market -------------------------------------------------
@@ -189,8 +189,8 @@ class AlpacaBroker:
 
     def load_picks(self, name: str = PICKS_WATCHLIST) -> Optional[list[str]]:
         """Ranked symbols saved by the stock picker, or None if never saved."""
-        if self._picks_cache is not None:
-            return list(self._picks_cache)
+        if name in self._picks_cache:
+            return list(self._picks_cache[name])
         w = self._find_watchlist(name)
         if w is None:
             return None
@@ -199,8 +199,8 @@ class AlpacaBroker:
 
     def picks_updated_on(self, name: str = PICKS_WATCHLIST) -> Optional[date]:
         """UTC date the picks were last refreshed, or None if never."""
-        if self._picks_saved_on is not None:
-            return self._picks_saved_on
+        if name in self._picks_saved_on:
+            return self._picks_saved_on[name]
         w = self._find_watchlist(name)
         if w is None:
             return None
@@ -224,8 +224,8 @@ class AlpacaBroker:
             self.trading.delete_watchlist_by_id(w.id)
 
     def save_picks(self, symbols: list[str], name: str = PICKS_WATCHLIST) -> None:
-        self._picks_cache = list(symbols)
-        self._picks_saved_on = datetime.now(timezone.utc).date()
+        self._picks_cache[name] = list(symbols)
+        self._picks_saved_on[name] = datetime.now(timezone.utc).date()
         if self.dry_run:
             log.info("[DRY RUN] would save %d picks to watchlist %r: %s", len(symbols), name, symbols)
             return

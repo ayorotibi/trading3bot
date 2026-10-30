@@ -32,6 +32,8 @@ services:
         sync: false
       - key: FINNHUB_API_KEY
         sync: false
+      - key: DISCLOSED_CAPITOL_API_KEY
+        sync: false
       - key: DRY_RUN
         value: "false"
       - key: PYTHON_VERSION

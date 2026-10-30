@@ -30,6 +30,7 @@ from typing import Optional
 
 from ..market import Technicals, technicals
 from .congress import DEFAULTS as CONGRESS_DEFAULTS
+from .congress import Pick
 from .congress import rank as congress_rank
 from .politicians import DEFAULTS as TRACK_DEFAULTS
 from .politicians import PriceHistory, TrackRecord, top_traders, track_records
@@ -50,6 +51,7 @@ DEFAULTS = {
     "market": {"most_actives": True, "top": 50},
 }
 
+CONGRESS_CACHE = "Congress Picks"
 EXECUTIVE_TITLES = ("CEO", "CFO", "COO", "PRES", "CHAIR", "CHIEF")
 
 
@@ -99,6 +101,7 @@ class Candidate:
     insiders: float = 0.0
     market: float = 0.0
     congress_buyers: list[str] = field(default_factory=list)
+    congress_rank: Optional[int] = None
     insider_names: list[str] = field(default_factory=list)
     trend: str = "unknown"
     sources: list[str] = field(default_factory=list)
@@ -107,6 +110,8 @@ class Candidate:
         parts = []
         if self.congress_buyers:
             parts.append(f"Congress {len(self.congress_buyers)}")
+        elif self.congress_rank:
+            parts.append(f"Congress #{self.congress_rank}")
         if self.insider_names:
             parts.append(f"Insiders {len(self.insider_names)}")
         parts.append(f"{self.trend}trend" if self.trend in ("up", "down") else f"trend {self.trend}")
@@ -128,6 +133,7 @@ def blend(congress: dict, insiders: dict[str, InsiderScore], techs: dict[str, Te
         if t in congress:
             c.congress = congress[t].score / max_c
             c.congress_buyers = congress[t].buyers
+            c.congress_rank = list(congress).index(t) + 1
             c.sources.append("congress")
         if t in insiders:
             c.insiders = insiders[t].score / max_i
@@ -187,15 +193,28 @@ class StockPicker:
         warnings: list[str] = []
         ccfg, icfg, mcfg = self.cfg["congress"], self.cfg["insiders"], self.cfg["market"]
 
-        disclosures = []
-        if ccfg.get("enabled", True) and self.congress_source:
-            try:
-                disclosures = self.congress_source.fetch(today)
-                if getattr(self.congress_source, "partial", False):
-                    warnings.append(f"Congress data incomplete (site throttled us after {len(disclosures)} trades)")
-            except Exception as exc:
-                log.exception("Congress source failed")
-                warnings.append(f"Congress data unavailable ({_short(exc)})")
+        notes: list[str] = []
+        disclosures, cached = [], None
+        src = self.congress_source
+        weekly = bool(getattr(src, "weekly", False))
+        if ccfg.get("enabled", True) and src:
+            if weekly:
+                cached = self.broker.load_picks(CONGRESS_CACHE)
+                when = self.broker.picks_updated_on(CONGRESS_CACHE)
+                fresh = cached is not None and when and (today - when).days < int(getattr(src, "refresh_days", 7))
+                if fresh:
+                    notes.append(f"Congress ranking from the {when:%a %d %b} weekly refresh")
+            if not (weekly and notes):
+                try:
+                    disclosures = src.fetch(today)
+                    cached = None
+                    if getattr(src, "partial", False):
+                        warnings.append(f"Congress data incomplete (site throttled us after {len(disclosures)} trades)")
+                except Exception as exc:
+                    log.exception("Congress source failed")
+                    warnings.append(f"Congress data unavailable ({_short(exc)})")
+                    if cached:
+                        notes.append("using last week's Congress ranking meanwhile")
         buys = []
         if icfg.get("enabled", True) and self.insider_source:
             try:
@@ -207,7 +226,8 @@ class StockPicker:
 
         ins = insider_scores(buys, today, int(icfg["lookback_days"]), float(icfg["cluster_bonus"]),
                              float(icfg["executive_bonus"]))
-        bar_tickers = ({d.ticker for d in disclosures if d.side == "buy"} | set(ins) | set(actives) | {"SPY"})
+        bar_tickers = ({d.ticker for d in disclosures if d.side == "buy"} | set(cached or []) | set(ins)
+                       | set(actives) | {"SPY"})
         start = today - timedelta(days=max(int(ccfg["history_days"]) + 10, 300))
         try:
             bars = self.broker.daily_bars(sorted(bar_tickers), start)
@@ -219,14 +239,36 @@ class StockPicker:
         techs = {t: technicals(rows, spy) for t, rows in bars.items()}
 
         records: dict[str, TrackRecord] = {}
-        if ccfg.get("use_track_records", True) and disclosures and bars:
-            closes = {t: [(r[0], r[1]) for r in rows] for t, rows in bars.items()}
-            records = track_records(disclosures, PriceHistory(closes), today,
-                                    {**TRACK_DEFAULTS, **(ccfg.get("track_record") or {})})
-        weights = {n: r.weight for n, r in records.items()}
-        cong = {p.ticker: p for p in congress_rank(disclosures, today, int(ccfg["lookback_days"]),
-                                                   int(ccfg["max_trade_age_days"]), None, weights)
-                if p.score > 0 and len(p.buyers) >= int(ccfg["min_buyers"])}
+        weights: dict[str, float] = {}
+        if ccfg.get("use_track_records", True) and disclosures:
+            if hasattr(src, "politician_weights"):
+                try:  # the provider's own performance stats per politician
+                    weights = src.politician_weights()
+                except Exception as exc:
+                    log.warning("Politician stats unavailable, counting everyone equally: %s", exc)
+                for d in disclosures:
+                    pid = (d.extra or {}).get("politician_id")
+                    if d.politician not in weights and pid is not None and f"id:{pid}" in weights:
+                        weights[d.politician] = weights[f"id:{pid}"]
+            elif bars:
+                closes = {t: [(r[0], r[1]) for r in rows] for t, rows in bars.items()}
+                records = track_records(disclosures, PriceHistory(closes), today,
+                                        {**TRACK_DEFAULTS, **(ccfg.get("track_record") or {})})
+                weights = {n: r.weight for n, r in records.items()}
+        if cached is not None:
+            cong = {t: Pick(t, float(len(cached) - i)) for i, t in enumerate(cached)}
+        else:
+            ranked_c = [p for p in congress_rank(disclosures, today, int(ccfg["lookback_days"]),
+                                                 int(ccfg["max_trade_age_days"]), None, weights)
+                        if p.score > 0 and len(p.buyers) >= int(ccfg["min_buyers"])]
+            cong = {p.ticker: p for p in ranked_c}
+            if weekly and disclosures and not getattr(src, "partial", False):
+                self.broker.save_picks([p.ticker for p in ranked_c[:50]], CONGRESS_CACHE)
+                notes.append(f"Congress refreshed: {len(disclosures)} trades, weekly")
+        credits = getattr(src, "credits_left", None)
+        if credits is not None:
+            notes.append(f"Disclosed Capitol credits left: {credits:,}" + (" — running low" if credits < 1500 else ""))
+        self._top_weights = sorted(((w, n) for n, w in weights.items() if not n.startswith("id:")), reverse=True)
 
         ranked = blend(cong, ins, techs, actives, self.cfg)
         picks = self._filter(ranked, techs)
@@ -238,7 +280,7 @@ class StockPicker:
         self.broker.mark_picks_incomplete(bool(warnings))
         if warnings:
             warnings.append("Will retry every hour today")
-        self._summary(picks, records, warnings, today, len(disclosures), len(buys))
+        self._summary(picks, records, warnings, today, len(disclosures), len(buys), notes)
         if self.reporter and today.weekday() == 0 and not retry:
             try:
                 self.reporter.send_weekly()
@@ -266,16 +308,21 @@ class StockPicker:
                 break
         return out
 
-    def _summary(self, picks, records, warnings, today, n_disclosures, n_buys) -> None:
+    def _summary(self, picks, records, warnings, today, n_disclosures, n_buys, notes=()) -> None:
         top = "\n".join(f"{i}. {c.ticker}  {c.score:.2f}  ({c.describe()})"
                         for i, c in enumerate(picks[:10], 1)) or "(no stock passed the filters)"
         traders = "\n".join(
             f"• {r.politician}: {r.avg_excess:+.1%} vs S&P, beat it {r.hit_rate:.0%} of {r.scored_trades} buys"
             for r in top_traders(records, n=3))
+        if not traders and getattr(self, "_top_weights", None):
+            traders = "\n".join(f"• {n}: weight {w:g}x" for w, n in self._top_weights[:3] if w > 1)
+        congress = f"{n_disclosures} congress trades" if n_disclosures else "Congress from cache"
         msg = (f"📋 Wheel picks for {today:%a %d %b} "
-               f"({n_disclosures} congress trades, {n_buys} insider buys read):\n{top}")
+               f"({congress}, {n_buys} insider buys read):\n{top}")
         if traders:
             msg += f"\n\nTop congress traders:\n{traders}"
+        if notes:
+            msg += "\n\nℹ️ " + "\nℹ️ ".join(notes)
         if warnings:
             msg += "\n\n⚠️ " + "\n⚠️ ".join(warnings)
         self.notify.send(msg)
