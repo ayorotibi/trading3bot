@@ -143,7 +143,7 @@ def test_take_profit_buys_back_at_half_premium():
     b.pos.append(Position(put, -1, 0.50, 0.20, True))
     b.quotes[put] = (0.18, 0.22)
     make(b).run(NOW)
-    assert [(o["symbol"], o["intent"], o["price"]) for o in b.submitted] == [(put, "buy_to_close", 0.22)]
+    assert [(o["symbol"], o["intent"], o["price"]) for o in b.submitted] == [(put, "buy_to_close", 0.20)]
 
 
 def test_cheap_option_bought_back_early_but_left_to_expire_on_expiry_day():
@@ -338,19 +338,74 @@ def test_keeps_running_cycle_after_stock_leaves_picks():
     assert [occ.parse(o["symbol"]).underlying for o in b.submitted] == ["SOFI"]
 
 
-def test_skips_symbol_with_working_order_and_reprices_stale_one():
+def test_working_order_is_left_alone_for_10_minutes():
     put = put_sym("SOFI", 30, 13)
     b = FakeBroker(prices={"SOFI": 15.0})
+    b.quotes[put] = (0.45, 0.49)
     b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
-    b.add_order(put, "wh-put-x", created_at=NOW - timedelta(minutes=5))
+    b.add_order(put, "wh-put-x", created_at=NOW - timedelta(minutes=5), limit_price=0.47)
     make(b).run(NOW)
+    assert b.submitted == [] and b.cancelled == [] and b.replaced == []
+
+
+def test_unfilled_sell_steps_down_towards_the_bid():
+    put = put_sym("SOFI", 30, 13)
+    b = FakeBroker(prices={"SOFI": 15.0})
+    b.quotes[put] = (0.40, 0.50)
+    b.add_order(put, "wh-put-x", created_at=NOW - timedelta(minutes=12), limit_price=0.45)
+    b.add_order(put.replace("13000", "12000"), "wh-put-y-r1", created_at=NOW - timedelta(minutes=11), limit_price=0.42)
+    b.quotes[put.replace("13000", "12000")] = (0.40, 0.50)
+    make(b, symbols=[]).run(NOW)
+    assert b.replaced == [("o0", 0.42, "wh-put-x-r1"), ("o1", 0.41, "wh-put-y-r2")]
     assert b.submitted == [] and b.cancelled == []
 
-    b2 = FakeBroker(prices={"SOFI": 15.0})
-    b2.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
-    b2.add_order(put, "wh-put-x", created_at=NOW - timedelta(minutes=45))
-    make(b2).run(NOW)
-    assert b2.cancelled == ["o0"] and len(b2.submitted) == 1
+
+def test_order_at_the_bid_that_never_fills_is_cancelled():
+    put = put_sym("SOFI", 30, 13)
+    b = FakeBroker(prices={"SOFI": 15.0})
+    b.quotes[put] = (0.40, 0.50)
+    b.add_order(put, "wh-put-x-r4", created_at=NOW - timedelta(minutes=12), limit_price=0.40)
+    make(b, symbols=[]).run(NOW)
+    assert b.cancelled == ["o0"] and b.replaced == []
+
+
+def test_unfilled_buy_back_steps_up_towards_the_ask():
+    put = put_sym("SOFI", 20, 13)
+    b = FakeBroker(prices={"SOFI": 16.0})
+    b.quotes[put] = (0.20, 0.30)
+    b.add_order(put, "wh-bc-x", created_at=NOW - timedelta(minutes=15), limit_price=0.25, side="buy")
+    make(b, symbols=[]).run(NOW)
+    assert b.replaced == [("o0", 0.28, "wh-bc-x-r1")]
+
+
+def test_reselected_put_is_not_alerted_twice_in_a_day():
+    """Yesterday's bug: the same TFC put announced 11 times."""
+    b = FakeBroker(prices={"SOFI": 15.0})
+    b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
+    b.today = [{"symbol": put_sym("SOFI", 30, 13), "coid": "wh-put-earlier", "status": "canceled",
+                "side": "sell", "filled_qty": 0.0, "price": 0.0}]
+    s = make(b)
+    s.run(NOW)
+    assert len(b.submitted) == 1 and s.notify.messages == []
+
+
+def test_first_put_of_the_day_is_alerted():
+    b = FakeBroker(prices={"SOFI": 15.0})
+    b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
+    s = make(b)
+    s.run(NOW)
+    assert len(s.notify.messages) == 1 and s.notify.messages[0].startswith("🟢 Selling 1x SOFI $13 put")
+
+
+def test_end_of_day_summary_lists_fills():
+    b = FakeBroker(prices={"SOFI": 15.0})
+    b.close_in = 5
+    b.today = [{"symbol": put_sym("SOFI", 30, 13), "coid": "wh-put-a", "status": "filled", "side": "sell",
+                "filled_qty": 1.0, "price": 0.45}]
+    s = make(b, symbols=[])
+    s.run(NOW)
+    assert s.notify.messages[-1].startswith("🌙 End of day")
+    assert "sold put 1x SOFI $13 put" in s.notify.messages[-1]
 
 
 def test_no_put_when_not_enough_cash():

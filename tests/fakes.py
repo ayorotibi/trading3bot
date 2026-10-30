@@ -26,6 +26,9 @@ class FakeBroker:
         self.dividends: dict = {}     # {symbol: (ex_date, cash)}
         self.activities: list[dict] = []
         self.filled: list[dict] = []  # [{"symbol", "coid", ...}] for filled_orders()
+        self.today: list[dict] = []   # earlier orders today, for orders_today()
+        self.replaced: list[tuple] = []
+        self.close_in = None          # minutes to the close
 
     # broker API used by strategies
     def market_is_open(self):
@@ -80,6 +83,17 @@ class FakeBroker:
     def filled_orders(self, prefix, days=30):
         return [o for o in self.filled if o["coid"].startswith(prefix)]
 
+    def orders_today(self, prefix="wh-"):
+        made = [{"symbol": o["symbol"], "coid": o["coid"], "status": "new", "side": o["side"],
+                 "filled_qty": 0.0, "price": 0.0} for o in self.submitted]
+        return [o for o in self.today + made if o["coid"].startswith(prefix)]
+
+    def minutes_to_close(self):
+        return self.close_in
+
+    def replace_option_limit(self, order_id, limit_price, client_order_id):
+        self.replaced.append((order_id, limit_price, client_order_id))
+
     def portfolio_change(self, period="1W"):
         return None
 
@@ -128,9 +142,9 @@ class FakeBroker:
             )
         return expiry
 
-    def add_order(self, symbol, coid, created_at):
+    def add_order(self, symbol, coid, created_at, limit_price=None, side="sell"):
         self.orders.append(OpenOrder(
-            id=f"o{len(self.orders)}", symbol=symbol, side="sell",
+            id=f"o{len(self.orders)}", symbol=symbol, side=side, limit_price=limit_price,
             created_at=created_at,
             client_order_id=coid, is_option=occ.is_option_symbol(symbol),
         ))

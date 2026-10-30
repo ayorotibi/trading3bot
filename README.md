@@ -51,7 +51,9 @@ Each source is scaled 0–1 and blended (`congress 1.0 + insiders 1.0 + market 0
 | **Call approaching its strike** | Stock still a pick and in an uptrend → **rolls up and out** for a net credit to keep a winner. Otherwise **lets the shares be called away** (at or above the adjusted cost basis, so the cycle is profitable) |
 | Out of the money near expiry | Lets it expire worthless |
 
-A stock is rolled at most 3 times in 120 days, then the bot accepts the outcome. Rolls are two steps: buy back the old contract, then sell the new one as soon as that fills.
+A stock is rolled at most 3 times in 120 days, then the bot accepts the outcome.
+
+**Getting orders filled** — every order starts at the mid-price. If it hasn't filled after 10 minutes, the bot edits the same order, moving the price halfway towards the bid (for sells) or the ask (for buy-backs). If it still doesn't fill at the bid, it cancels and picks a fresh contract. Price changes go to the logs only: you get one Telegram message per new position per day, plus an end-of-day summary of what actually filled. Rolls are two steps: buy back the old contract, then sell the new one as soon as that fills.
 
 **Cost basis across cycles** — the bot rebuilds each stock's full history from Alpaca's records (premiums, assignments, expiries, shares called away). Its **adjusted cost basis** = what you paid for the shares minus all premium collected in the current campaign; covered calls are never sold below it. For example, a $13 put assigned after collecting $0.80 gives an adjusted basis of $12.20. It also tracks the number of completed cycles, total premium and realised profit per stock.
 
@@ -63,7 +65,7 @@ There is no database: everything is worked out from your Alpaca positions, order
 
 | Where | What you see |
 |---|---|
-| **Telegram / Discord** | Daily picks (with which sources agree), every trade with its reasoning (delta target and why, yield, earnings), rolls, take-profits, errors, and a **weekly report every Monday** (account change, open contracts, adjusted cost basis, premium and profit per stock) |
+| **Telegram / Discord** | Daily picks (with which sources agree), each new position with its reasoning (once a day per position), an end-of-day summary of fills (delta target and why, yield, earnings), rolls, take-profits, errors, and a **weekly report every Monday** (account change, open contracts, adjusted cost basis, premium and profit per stock) |
 | **Trade log page** | Wheel picks, the wheel ledger (shares, purchase price, adjusted basis, premium collected, cycles and profit), every bot order, positions with P/L, cash and equity |
 | **Render → trading-bot → Logs** | Every decision, including why it *didn't* trade ("earnings on 12 Nov are too close", "no roll pays a credit; accepting assignment") |
 

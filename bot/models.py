@@ -34,6 +34,7 @@ class OpenOrder:
     client_order_id: str
     is_option: bool
     position_intent: Optional[str] = None
+    limit_price: Optional[float] = None
 
 
 @dataclass

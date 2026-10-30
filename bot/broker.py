@@ -123,8 +123,25 @@ class AlpacaBroker:
                 is_option=_enum_value(o.asset_class) == AssetClass.US_OPTION.value
                 or occ.is_option_symbol(o.symbol),
                 position_intent=_enum_value(o.position_intent) or None,
+                limit_price=_f(o.limit_price, None),
             )
             for o in orders
+        ]
+
+    def minutes_to_close(self) -> Optional[float]:
+        clock = self.trading.get_clock()
+        if not clock.is_open or not clock.next_close:
+            return None
+        return (clock.next_close - clock.timestamp).total_seconds() / 60
+
+    def orders_today(self, prefix: str = "wh-") -> list[dict]:
+        """Every order (any status) placed since midnight UTC whose client_order_id starts with prefix."""
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        batch = self.trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500, after=start))
+        return [
+            {"symbol": o.symbol, "coid": o.client_order_id or "", "status": _enum_value(o.status),
+             "side": _enum_value(o.side), "filled_qty": _f(o.filled_qty), "price": _f(o.filled_avg_price)}
+            for o in batch if (o.client_order_id or "").startswith(prefix)
         ]
 
     def order_exists(self, client_order_id: str) -> bool:
@@ -416,6 +433,17 @@ class AlpacaBroker:
         )
         amount = f"${notional:.2f}" if notional is not None else f"{qty} shares"
         return self._submit(req, f"{side} {amount} of {symbol}")
+
+    def replace_option_limit(self, order_id: str, limit_price: float, client_order_id: str) -> None:
+        """Change an open order's limit price (keeps its place; no new order)."""
+        from alpaca.trading.requests import ReplaceOrderRequest
+
+        if self.dry_run:
+            log.info("[DRY RUN] would re-price order %s to %.2f", order_id, limit_price)
+            return
+        self.trading.replace_order_by_id(
+            order_id, ReplaceOrderRequest(limit_price=round(limit_price, 2), client_order_id=client_order_id)
+        )
 
     def cancel_order(self, order_id: str) -> None:
         if self.dry_run:

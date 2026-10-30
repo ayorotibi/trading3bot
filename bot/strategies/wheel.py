@@ -100,7 +100,7 @@ DEFAULTS = {
     "roll_min_dte": 14,
     "roll_max_dte": 45,
     "ex_div_days": 2,
-    "reprice_after_minutes": 30,
+    "reprice_every_minutes": 10,
 }
 
 
@@ -293,8 +293,10 @@ class WheelStrategy:
         picks = self.broker.load_picks() or []
         self.wanted = set(picks)
 
+        self._today_orders = None
+        self._orders_today()  # snapshot before this run places anything
         orders = self.broker.open_orders()
-        self._cancel_stale_orders(orders, now)
+        self._work_orders(orders, now)
         orders = self.broker.open_orders()
         positions = self._positions = self.broker.positions()
 
@@ -318,6 +320,14 @@ class WheelStrategy:
 
         # 2. New cycles on the best picks
         self._start_new_cycles(active, positions, orders, account, reserved, picks)
+
+        # 3. End-of-day summary on the last run before the close
+        try:
+            mins = self.broker.minutes_to_close()
+            if mins is not None and 0 < mins <= 5.5:
+                self._daily_summary()
+        except Exception:
+            log.exception("Daily summary failed")
 
     # ---- 1. managing open contracts ---------------------------------------
     def _manage(self, positions, orders) -> None:
@@ -407,10 +417,11 @@ class WheelStrategy:
             log.info("Wheel: %s at/above strike (%.2f); letting shares be called away at a profit", label, spot)
 
     def _buy_back(self, symbol, qty, ask, message) -> None:
-        price = round_to_tick(ask, up=True)
+        bid, _ = self.broker.option_quote(symbol)
+        price = max(0.01, round_to_tick((bid + ask) / 2 if bid > 0 else ask, up=True))  # start at mid
         coid = f"wh-bc-{symbol}-{self.now:%Y%m%d%H%M}"
         self.broker.submit_option_limit(symbol, qty, "buy", price, "buy_to_close", coid)
-        self.notify.send(f"{message} — buying back {qty}x @ ${price:.2f}")
+        self._alert(f"{message} — buying back {qty}x from ${price:.2f}", "wh-bc", symbol)
 
     def _rolls_done(self, sym: str) -> int:
         try:
@@ -439,11 +450,12 @@ class WheelStrategy:
         self.broker.submit_option_limit(p.symbol, qty, "buy", close_cost, "buy_to_close", coid)
         credit = sell_price(target) - close_cost
         direction = "down and out" if info.type == "put" else "up and out"
-        self.notify.send(
+        self._alert_text = (
             f"🔄 Rolling {sym} {info.type} {direction} ({why}): buying back ${info.strike:g} "
             f"exp {info.expiry:%d %b} @ ${close_cost:.2f}, then selling ${target.strike:g} "
             f"exp {target.expiry:%d %b} @ ~${sell_price(target):.2f} (net credit ~${credit * 100 * qty:.0f})"
         )
+        self._alert(self._alert_text, "wh-rc", p.symbol)
         return True
 
     def _pending_rolls(self, positions, orders) -> dict[str, str]:
@@ -526,8 +538,8 @@ class WheelStrategy:
         price = sell_price(q)
         coid = f"wh-ro-{new_symbol}-{self.now:%H%M}"
         self.broker.submit_option_limit(new_symbol, qty, "sell", price, "sell_to_open", coid)
-        self.notify.send(f"🔄 Roll completed: sold {qty}x {info.underlying} ${info.strike:g} {info.type} "
-                         f"exp {info.expiry:%d %b} @ ${price:.2f}")
+        self._alert(f"🔄 Roll, second step: selling {qty}x {info.underlying} ${info.strike:g} {info.type} "
+                    f"exp {info.expiry:%d %b} from ${price:.2f}", "wh-ro", new_symbol)
         return info.strike * 100 * qty if info.type == "put" else 0.0
 
     # ---- 3. new cycles -----------------------------------------------------
@@ -621,10 +633,10 @@ class WheelStrategy:
         coid = f"wh-put-{q.symbol}-{self.now:%Y%m%d%H%M}"
         self.broker.submit_option_limit(q.symbol, n, "sell", price, "sell_to_open", coid)
         d = f", delta {abs(q.delta):.2f}" if q.delta is not None else ""
-        self.notify.send(
-            f"🟢 Selling {n}x {sym} ${q.strike:g} put exp {q.expiry:%d %b} @ ${price:.2f}{d} "
+        self._alert(
+            f"🟢 Selling {n}x {sym} ${q.strike:g} put exp {q.expiry:%d %b} from ${price:.2f}{d} "
             f"(stock ${spot:.2f}, premium ${price * 100 * n:.0f}, {annual_yield(q, q.strike, self.today):.0%}/yr "
-            f"on ${needed:,.0f} cash; {detail})"
+            f"on ${needed:,.0f} cash; {detail})", "wh-put", q.symbol, underlying=sym,
         )
         account.options_buying_power -= needed
         return needed
@@ -640,17 +652,105 @@ class WheelStrategy:
         price = sell_price(q)
         coid = f"wh-call-{q.symbol}-{self.now:%Y%m%d%H%M}"
         self.broker.submit_option_limit(q.symbol, contracts, "sell", price, "sell_to_open", coid)
-        self.notify.send(
-            f"🔵 Selling {contracts}x {sym} ${q.strike:g} covered call exp {q.expiry:%d %b} @ ${price:.2f} "
-            f"(stock ${spot:.2f}, adjusted cost basis ${floor or 0:.2f}; {detail})"
+        self._alert(
+            f"🔵 Selling {contracts}x {sym} ${q.strike:g} covered call exp {q.expiry:%d %b} from ${price:.2f} "
+            f"(stock ${spot:.2f}, adjusted cost basis ${floor or 0:.2f}; {detail})", "wh-call", q.symbol, underlying=sym,
         )
 
-    def _cancel_stale_orders(self, orders, now: datetime) -> None:
-        limit = timedelta(minutes=int(self.cfg["reprice_after_minutes"]))
+    # ---- order handling & alerts --------------------------------------------
+    def _orders_today(self) -> list[dict]:
+        if self._today_orders is None:
+            try:
+                self._today_orders = self.broker.orders_today("wh-")
+            except Exception as exc:
+                log.warning("Couldn't read today's orders: %s", exc)
+                self._today_orders = []
+        return self._today_orders
+
+    def _alert(self, message: str, prefix: str, symbol: str, underlying: Optional[str] = None) -> None:
+        """Telegram once per position per day; a repeat (re-selected after a cancel) goes to the log only.
+
+        Today's orders are read at the start of the run, before anything is placed.
+        """
+        def same(o):
+            if not o["coid"].startswith(prefix + "-"):
+                return False
+            if underlying and occ.is_option_symbol(o["symbol"]):
+                return occ.parse(o["symbol"]).underlying == underlying
+            return o["symbol"] == symbol
+        if any(same(o) for o in self._orders_today()):
+            log.info("(already alerted today) %s", message)
+            return
+        self.notify.send(message)
+
+    def _work_orders(self, orders, now: datetime) -> None:
+        """Step unfilled wheel orders towards a fill.
+
+        Every `reprice_every_minutes`, an unfilled sell moves halfway from its
+        limit to the bid (a buy: halfway to the ask), at least one tick. An order
+        already at the bid (ask) that still hasn't filled is cancelled, and the
+        next run picks a fresh contract. Price changes are logged, not alerted.
+        """
+        every = timedelta(minutes=int(self.cfg["reprice_every_minutes"]))
         for o in orders:
-            if not (o.is_option and o.client_order_id.startswith("wh-")):
+            if not (o.is_option and o.client_order_id.startswith("wh-")) or o.limit_price is None:
                 continue
             created = o.created_at if o.created_at.tzinfo else o.created_at.replace(tzinfo=timezone.utc)
-            if now - created > limit:
-                log.info("Wheel: cancelling unfilled order %s on %s to re-price", o.id, o.symbol)
+            if now - created < every:
+                continue
+            try:
+                bid, ask = self.broker.option_quote(o.symbol)
+            except Exception as exc:
+                log.warning("No quote for %s: %s", o.symbol, exc)
+                continue
+            limit = o.limit_price
+            tick = 0.05 if limit >= 3 else 0.01
+            if o.side == "sell":
+                if bid <= 0:
+                    continue
+                new = max(bid, round_to_tick(limit - max(tick, (limit - bid) / 2), up=False))
+                stuck = limit <= bid
+            else:
+                if ask <= 0:
+                    continue
+                new = min(ask, round_to_tick(limit + max(tick, (ask - limit) / 2), up=True))
+                stuck = limit >= ask
+            if stuck or new == limit:
+                log.info("Wheel: %s order on %s at %.2f unfilled at the %s; cancelling to re-select",
+                         o.side, o.symbol, limit, "bid" if o.side == "sell" else "ask")
                 self.broker.cancel_order(o.id)
+                continue
+            base, _, n = o.client_order_id.rpartition("-r")
+            step = int(n) + 1 if n.isdigit() and base else 1
+            root = base if n.isdigit() and base else o.client_order_id
+            try:
+                self.broker.replace_option_limit(o.id, new, f"{root}-r{step}")
+                log.info("Wheel: re-priced %s %s from %.2f to %.2f (bid %.2f / ask %.2f)",
+                         o.side, o.symbol, limit, new, bid, ask)
+            except Exception as exc:
+                log.warning("Re-pricing %s failed (%s); cancelling", o.symbol, exc)
+                self.broker.cancel_order(o.id)
+
+    def _daily_summary(self) -> None:
+        orders = self._orders_today()
+        fills = [o for o in orders if o["filled_qty"] > 0]
+        lines = [f"🌙 End of day {self.today:%a %d %b}"]
+        if fills:
+            lines.append("Filled today:")
+            labels = {"wh-put": "sold put", "wh-call": "sold call", "wh-bc": "bought back", "wh-tp": "bought back",
+                      "wh-rc": "roll: bought back", "wh-ro": "roll: sold"}
+            for o in fills:
+                kind = next((v for k, v in labels.items() if o["coid"].startswith(k + "-")), o["side"])
+                if occ.is_option_symbol(o["symbol"]):
+                    i = occ.parse(o["symbol"])
+                    what = f"{i.underlying} ${i.strike:g} {i.type} exp {i.expiry:%d %b}"
+                else:
+                    what = o["symbol"]
+                lines.append(f"• {kind} {o['filled_qty']:g}x {what} @ ${o['price']:.2f}")
+        else:
+            lines.append("No fills today.")
+        shorts = [p for p in self._positions if p.is_option and p.qty < 0]
+        reserved = sum(occ.parse(p.symbol).strike * 100 * abs(p.qty) for p in shorts
+                       if occ.parse(p.symbol).type == "put")
+        lines.append(f"Open contracts: {len(shorts)} · cash backing puts ${reserved:,.0f}")
+        self.notify.send("\n".join(lines))

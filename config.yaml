@@ -104,4 +104,4 @@ wheel:
   min_roll_credit: 0.05          # only roll if the new contract pays at least $0.05/share more than closing
   roll_min_dte: 14
   roll_max_dte: 45
-  reprice_after_minutes: 30      # cancel and re-price unfilled orders after this long
+  reprice_every_minutes: 10      # unfilled orders step halfway towards the bid (sells) / ask (buys) this often
