@@ -106,6 +106,9 @@ wheel:
 
   # --- managing open contracts ---
   take_profit_pct: 0.50          # buy back once 50% of the premium is captured
+  stop_loss_multiple: 3          # close a put once its loss is 3x the premium collected, if the stock
+                                 # has left the picks or is in a downtrend (0 = no stop-loss)
+  stop_loss_exempt: [INTC261127P00084000]  # contracts left to the normal roll/assign rules (user's choice, 2 Nov)
   close_cheap_at: 0.05           # buy back at $0.05 or less to free the cash early
   manage_dte: 7                  # with 7 days or less left, decide: roll, let expire, or accept assignment
   tested_buffer: 0.02            # "approaching the strike" = within 2%

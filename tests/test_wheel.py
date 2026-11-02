@@ -482,3 +482,41 @@ def test_earnings_health_check_messages(monkeypatch):
     assert "no dates" in ev.EarningsCalendar(api_key="k").health_check()
     monkeypatch.setattr(ev.requests, "get", lambda *a, **k: R({"earningsCalendar": [{"symbol": "AAPL", "date": "2027-01-28"}]}))
     assert ev.EarningsCalendar(api_key="k").health_check() is None
+
+
+# ---- stop-loss (added 2 Nov) ---------------------------------------------------
+def _losing_put(picks, exempt=()):
+    b = FakeBroker(prices={"INTC": 65.0})
+    b.picks = picks
+    put = put_sym("INTC", 25, 84)
+    b.pos.append(Position(put, -1, 2.86, 21.0, True))
+    b.quotes[put] = (20.80, 21.30)
+    s = make(b, symbols=[], stop_loss_exempt=list(exempt))
+    s.run(NOW)
+    return b, s, put
+
+
+def test_stop_loss_closes_put_on_unwanted_stock():
+    b, s, put = _losing_put(picks=["AAA"])
+    assert [(o["symbol"], o["intent"]) for o in b.submitted] == [(put, "buy_to_close")]
+    assert "Stop-loss" in s.notify.messages[0]
+
+
+def test_stop_loss_holds_if_stock_still_wanted():
+    b, _, _ = _losing_put(picks=["INTC"])
+    assert b.submitted == []
+
+
+def test_stop_loss_exempt_contract_left_alone():
+    b, _, put = _losing_put(picks=["AAA"], exempt=[put_sym("INTC", 25, 84)])
+    assert b.submitted == []
+
+
+def test_no_stop_loss_below_three_times_premium():
+    b = FakeBroker(prices={"INTC": 80.0})
+    b.picks = ["AAA"]
+    put = put_sym("INTC", 25, 84)
+    b.pos.append(Position(put, -1, 2.86, 8.0, True))
+    b.quotes[put] = (7.90, 8.10)   # loss ~1.8x premium
+    make(b, symbols=[]).run(NOW)
+    assert b.submitted == []

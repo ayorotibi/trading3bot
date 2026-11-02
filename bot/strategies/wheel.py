@@ -94,6 +94,8 @@ DEFAULTS = {
     "event_term_ratio": 1.2,
     # management
     "take_profit_pct": 0.50,
+    "stop_loss_multiple": 3.0,
+    "stop_loss_exempt": [],
     "close_cheap_at": 0.05,
     "manage_dte": 7,
     "tested_buffer": 0.02,
@@ -363,6 +365,19 @@ class WheelStrategy:
         if tp and ask > 0 and ask <= entry * (1 - tp):
             self._buy_back(p.symbol, qty, ask, f"✅ Take profit on {label}: {profit_pct:.0%} of the premium captured")
             return
+        # Stop-loss on puts whose stock we no longer want
+        stop = float(self.cfg["stop_loss_multiple"] or 0)
+        if (stop and info.type == "put" and entry > 0 and mark >= entry * (1 + stop)
+                and p.symbol not in set(self.cfg["stop_loss_exempt"] or [])):
+            tech_s = self.tech(sym)
+            unwanted = sym not in self.wanted or (tech_s is not None and tech_s.trend == "down")
+            if unwanted:
+                loss = (mark - entry) * 100 * qty
+                self._buy_back(p.symbol, qty, ask, f"🛑 Stop-loss on {label}: loss ~${loss:,.0f} is over "
+                                                    f"{stop:g}x the ${entry * 100 * qty:,.0f} premium and {sym} "
+                                                    "is no longer a pick")
+                return
+            log.info("Wheel: %s past the stop-loss level but %s is still wanted; holding", label, sym)
         # Nearly worthless
         cheap = float(self.cfg["close_cheap_at"] or 0)
         if cheap and 0 < ask <= cheap:

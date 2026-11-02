@@ -34,6 +34,7 @@ Each source is scaled 0–1 and blended (`congress 1.0 + insiders 1.0 + market 0
 ### 2. The wheel (every run)
 
 **Choosing a contract**
+- **Event backstop:** no new put when options price in a big move (implied volatility ≥ 2× realised, or this week's options ≥ 1.2× pricier than next month's), or when the earnings lookup for that stock failed. Earnings reported later *today* count too.
 - **Expiry:** nearest to 30 days (21–45), but **always before the next earnings date** (as short as 7 days to fit). If earnings are within a week, it waits until after.
 - **Strike adapts to conditions** — the delta target starts at 0.30 (≈30% chance of assignment) and moves further out of the money when the stock is below its 50-day average, when the market is **defensive** (S&P 500 below its 50-day average or very volatile), and when premiums are rich (implied volatility ≥ 1.3× recent realised volatility). Covered calls go further out in strong uptrends so the shares have room to rise.
 - **Must be worth it:** puts must pay ≥ 10% a year on the cash they tie up (calls ≥ 4% on the shares), with a tight bid/ask spread.
@@ -44,6 +45,7 @@ Each source is scaled 0–1 and blended (`congress 1.0 + insiders 1.0 + market 0
 | Situation | What it does |
 |---|---|
 | 50% of the premium captured | Buys it back (take profit) |
+| **Put losing 3× its premium** and the stock has left the picks or is in a downtrend | **Stop-loss:** buys it back to cap the loss (contracts listed in `stop_loss_exempt` are left to the normal rules) |
 | Contract worth ≤ $0.05 | Buys it back to free the cash early; on expiry day just lets it expire |
 | Earnings within 2 days, ≥ 25% profit | Closes it before earnings |
 | Covered call in the money just before ex-dividend, time value < dividend | Early assignment is likely: rolls it if the stock is still wanted, otherwise lets the shares go |
