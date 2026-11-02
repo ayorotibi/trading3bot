@@ -77,42 +77,64 @@ def parse_trades(rows: list[dict]) -> list[Disclosure]:
     return out
 
 
-def _pick(d: dict, words: tuple, avoid: tuple = ()) -> Optional[float]:
-    """First numeric field whose name contains all `words` (and none of `avoid`)."""
-    for k in sorted(d):
-        lk = k.lower()
-        if all(w in lk for w in words) and not any(a in lk for a in avoid):
-            v = _num(d[k])
-            if v is not None:
-                return v
+# Performance after the trade became public is what copying can actually earn,
+# so prefer those fields, then broader alpha measures.
+ALPHA_FIELDS = ("avg_public_alpha_90d", "avg_public_alpha_180d", "avg_public_alpha_30d",
+                "annualized_alpha_pct", "avg_alpha_30d")
+COUNT_FIELDS = ("trade_count", "enriched_trades")
+
+
+def _first_field(rows: list[dict], fields: tuple) -> Optional[str]:
+    """The first field in `fields` that has numbers for at least some rows."""
+    for f in fields:
+        if any(_num(r.get(f)) is not None for r in rows):
+            return f
     return None
+
+
+def _is_percent(rows: list[dict], field: str) -> bool:
+    """Decide the units from the whole data set: typical alphas are a few percent.
+
+    If the median size is above 0.2 the values must be percentages (2.5 = 2.5%),
+    otherwise fractions (0.025 = 2.5%). Fields ending in _pct are percentages.
+    """
+    if field.endswith("_pct"):
+        return True
+    vals = sorted(abs(v) for v in (_num(r.get(field)) for r in rows) if v is not None)
+    return bool(vals) and vals[len(vals) // 2] > 0.2
 
 
 def politician_weights(rows: list[dict], weight_per_alpha: float = 5.0, min_trades: int = 5,
                        shrink: float = 10.0, min_w: float = 0.25, max_w: float = 3.0) -> dict[str, float]:
-    """Weight each member by their alpha (return vs the market) from Disclosed Capitol.
+    """Weight each member by their alpha (return vs the market) after disclosure.
 
-    Alpha may be given as a fraction (0.12) or a percentage (12.0); values
-    above 1.5 in size are treated as percentages. Few trades -> pulled to 1.0.
+    weight = 1 + 5 x alpha x n/(n+10), clamped to 0.25-3, where n = their trade
+    count (few trades -> pulled towards 1.0). Fewer than min_trades -> 1.0.
+    e.g. +10% alpha over 40 trades -> 1 + 5 x 0.10 x 0.8 = 1.4x.
     """
+    field = _first_field(rows, ALPHA_FIELDS)
+    count_field = _first_field(rows, COUNT_FIELDS)
+    if field is None:
+        log.warning("Disclosed Capitol: no alpha field found; everyone weighted equally")
+        return {}
+    scale = 100.0 if _is_percent(rows, field) else 1.0
+    log.info("Disclosed Capitol: weighting by %s (%s), trade count from %s",
+             field, "percent" if scale == 100 else "fraction", count_field)
     out = {}
     for r in rows:
         name = str(r.get("name") or r.get("politician_name") or r.get("full_name") or "")
-        if not name:
+        alpha = _num(r.get(field))
+        if not name or alpha is None:
             continue
-        alpha = _pick(r, ("alpha",), avoid=("rank", "percentile"))
-        trades = _pick(r, ("trade",), avoid=("last", "date", "days"))
-        if alpha is None:
-            continue
-        if abs(alpha) > 1.5:
-            alpha /= 100.0
+        alpha /= scale
+        trades = _num(r.get(count_field)) if count_field else None
         if trades is not None and trades < min_trades:
             w = 1.0
         else:
             n = trades if trades is not None else shrink
             w = round(min(max_w, max(min_w, 1.0 + weight_per_alpha * alpha * n / (n + shrink))), 3)
         out[name] = w
-        pid = r.get("id") or r.get("politician_id")
+        pid = r.get("politician_id") or r.get("id")
         if pid is not None:
             out[f"id:{pid}"] = w
     return out

@@ -30,15 +30,37 @@ def test_parse_trades_keeps_stock_buys_and_sells_only():
     assert t[0].size == "$15,001 - $50,000"
 
 
-def test_politician_weights_from_alpha_percent_or_fraction():
-    w = politician_weights([
-        {"id": 1, "name": "Winner", "alpha_1y": 12.0, "trade_count": 40},     # percent
-        {"id": 2, "name": "Loser", "alpha": -0.15, "total_trades": 30},       # fraction
-        {"id": 3, "name": "Newbie", "alpha": 0.50, "trade_count": 2},         # too few trades
-        {"id": 4, "name": "No Stats"},
-    ])
-    assert w["Winner"] > 1.4 and w["Loser"] < 0.5 and w["Newbie"] == 1.0
-    assert "No Stats" not in w and w["id:1"] == w["Winner"]
+REAL_FIELDS = {"annualized_alpha_pct": 0.0, "avg_trade_size": 48000, "enriched_trades": 0, "win_rate": 0.5}
+
+
+def member(pid, name, public90, trades, **extra):
+    return {**REAL_FIELDS, "politician_id": pid, "name": name, "avg_public_alpha_90d": public90,
+            "trade_count": trades, **extra}
+
+
+def test_weights_use_public_alpha_and_real_trade_count():
+    """2 Nov bug: avg_trade_size was read as the trade count, so everyone hit the 3x cap."""
+    rows = [member(1, "Steady Winner", 6.0, 80), member(2, "Lucky Once", 40.0, 3),
+            member(3, "Small Sample", 20.0, 6), member(4, "Laggard", -8.0, 50),
+            member(5, "Average", 1.0, 30)]
+    w = politician_weights(rows)  # values in percent (median 8 > 0.2)
+    assert 1.2 < w["Steady Winner"] < 1.3          # 1 + 5 x 0.06 x 80/90 = 1.27
+    assert w["Lucky Once"] == 1.0                  # under 5 trades
+    assert 1.3 < w["Small Sample"] < 1.45          # 1 + 5 x 0.20 x 6/16 = 1.375
+    assert 0.6 < w["Laggard"] < 0.7                # 1 - 5 x 0.08 x 50/60 = 0.67
+    assert w["id:1"] == w["Steady Winner"]
+    assert max(v for k, v in w.items() if not k.startswith("id:")) < 3.0
+
+
+def test_weights_detect_fraction_units():
+    rows = [member(1, "A", 0.06, 80), member(2, "B", -0.02, 40), member(3, "C", 0.01, 30)]
+    w = politician_weights(rows)
+    assert 1.2 < w["A"] < 1.3 and w["B"] < 1.0
+
+
+def test_weights_fall_back_to_annualized_alpha_pct():
+    rows = [{"name": "X", "politician_id": 9, "annualized_alpha_pct": 10.0, "trade_count": 90}]
+    assert 1.4 < politician_weights(rows)["X"] < 1.5
 
 
 class Resp:
@@ -124,7 +146,7 @@ def test_weekly_refresh_then_cached_ranking_on_other_days():
     s = StockPicker(b, {}, MemoryNotifier(), src, ListSource([]))
     picks = s.run(NOW)
     assert [c.ticker for c in picks] == ["GOOD", "BAD"]         # track records beat a bigger crowd
-    assert b.other_lists["Congress Picks v2"][0] == ["GOOD", "BAD"] and src.calls == 1
+    assert b.other_lists["Congress Picks v3"][0] == ["GOOD", "BAD"] and src.calls == 1
     assert "Congress refreshed" in s.notify.messages[0] and "credits left: 5,000" in s.notify.messages[0]
 
     # next day: no API call, same Congress order from the cache
@@ -141,7 +163,7 @@ def test_weekly_refresh_then_cached_ranking_on_other_days():
 
 def test_failed_refresh_falls_back_to_last_weeks_ranking():
     b = healthy_broker("OLD")
-    b.other_lists["Congress Picks v2"] = (["OLD"], TODAY - timedelta(days=9))
+    b.other_lists["Congress Picks v3"] = (["OLD"], TODAY - timedelta(days=9))
     s = StockPicker(b, {}, MemoryNotifier(), WeeklySource([], fail=True), ListSource([]))
     picks = s.run(NOW)
     assert [c.ticker for c in picks] == ["OLD"] and b.incomplete
@@ -150,7 +172,7 @@ def test_failed_refresh_falls_back_to_last_weeks_ranking():
 
 
 def test_rejected_page_size_steps_down(monkeypatch):
-    people = [{"id": i, "name": f"P{i}", "alpha": 0.1, "trade_count": 20} for i in range(150)]
+    people = [member(i, f"P{i}", 0.1, 20) for i in range(150)]
     calls = fake_get(monkeypatch, [Resp(422), Resp(422), Resp(422), Resp(200, people[:100]),
                                    Resp(200, people[100:], {"X-Credits-Remaining": "5100"})])
     src = DisclosedCapitolSource(api_key="k")
@@ -161,7 +183,7 @@ def test_rejected_page_size_steps_down(monkeypatch):
 
 
 def test_no_paging_params_as_last_resort(monkeypatch):
-    calls = fake_get(monkeypatch, [Resp(422)] * 5 + [Resp(200, [{"name": "A", "alpha": 0.2}])])
+    calls = fake_get(monkeypatch, [Resp(422)] * 5 + [Resp(200, [member(1, "A", 0.2, 20)])])
     assert DisclosedCapitolSource(api_key="k").politician_weights()["A"] > 1
     assert calls[-1][1] == {}
 
