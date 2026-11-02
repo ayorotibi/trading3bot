@@ -19,7 +19,9 @@ picker:
   # their value quickly, which is dangerous when selling puts. Add your own, e.g. GME.
   exclude: [TQQQ, SQQQ, SOXL, SOXS, TSLL, TSLQ, TSLZ, NVDL, NVDU, NVDD, UVXY, UVIX, SVIX, VXX,
             SPXL, SPXS, UPRO, SPXU, SDS, SSO, QLD, TNA, TZA, LABU, LABD, FAS, FAZ, YINN, YANG,
-            BITX, MSTU, MSTX, MSTZ, CONL, GGLL, AMDL, AAPU, METU, TECL, FNGU, FNGD, BOIL, KOLD]
+            BITX, MSTU, MSTX, MSTZ, CONL, GGLL, AMDL, AAPU, METU, TECL, FNGU, FNGD, BOIL, KOLD,
+            # cash-like Treasury-bill / money-market funds: barely move, so their options pay nothing
+            SGOV, BIL, SHV, USFR, TFLO, JPST, BILS, XBIL, TBIL, CLIP, GBIL, SHY, MINT, ICSH, PULS]
 
   # How much each source counts. Each is scaled 0-1 (best stock = 1) before blending.
   weights:

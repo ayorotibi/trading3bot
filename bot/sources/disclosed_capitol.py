@@ -194,6 +194,9 @@ class DisclosedCapitolSource:
         rows = self._get("/politicians", {})
         if rows:
             log.info("Disclosed Capitol politician fields: %s", sorted(rows[0].keys()))
+            numeric = {k: v for k, v in rows[0].items() if _num(v) is not None and k != "id"}
+            log.info("Disclosed Capitol sample politician stats (%s): %s",
+                     rows[0].get("name") or rows[0].get("politician_name"), numeric)
         cfg = {k: v for k, v in self.track_cfg.items()
                if k in ("weight_per_alpha", "min_trades", "shrink", "min_w", "max_w")}
         weights = politician_weights(rows, **cfg)

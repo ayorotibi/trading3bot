@@ -270,7 +270,11 @@ class StockPicker:
         credits = getattr(src, "credits_left", None)
         if credits is not None:
             notes.append(f"Disclosed Capitol credits left: {credits:,}" + (" — running low" if credits < 1500 else ""))
-        self._top_weights = sorted(((w, n) for n, w in weights.items() if not n.startswith("id:")), reverse=True)
+        # Top traders = politicians who BOUGHT in the lookback window, best weight first
+        window = today - timedelta(days=int(ccfg["lookback_days"]))
+        active = {d.politician for d in disclosures if d.side == "buy" and (d.published_date or today) >= window}
+        self._top_weights = sorted(((w, n) for n, w in weights.items()
+                                    if not n.startswith("id:") and n in active), reverse=True)
 
         ranked = blend(cong, ins, techs, actives, self.cfg)
         picks = self._filter(ranked, techs)

@@ -164,3 +164,13 @@ def test_no_paging_params_as_last_resort(monkeypatch):
     calls = fake_get(monkeypatch, [Resp(422)] * 5 + [Resp(200, [{"name": "A", "alpha": 0.2}])])
     assert DisclosedCapitolSource(api_key="k").politician_weights()["A"] > 1
     assert calls[-1][1] == {}
+
+
+def test_top_traders_only_lists_politicians_active_in_the_window():
+    b = healthy_broker("GOOD")
+    src = WeeklySource(dc_trades(("Active One", "GOOD"), ("Active Two", "GOOD")),
+                       weights={"Active One": 1.8, "Active Two": 1.2, "Retired Legend": 3.0})
+    s = StockPicker(b, {}, MemoryNotifier(), src, ListSource([]))
+    s.run(NOW)
+    msg = s.notify.messages[0]
+    assert "Active One: weight 1.8x" in msg and "Retired Legend" not in msg
