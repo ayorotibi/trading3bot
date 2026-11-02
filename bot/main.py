@@ -57,7 +57,7 @@ def make_broker(config: dict, dry_run: bool):
     return broker, ("PAPER" if paper else "LIVE")
 
 
-def make_picker(config: dict, broker, notifier, reporter=None):
+def make_picker(config: dict, broker, notifier, reporter=None, earnings=None):
     from .sources.openinsider import OpenInsiderSource
     from .sources.quiver import QuiverSource
     from .strategies.picker import DEFAULTS, StockPicker
@@ -76,7 +76,7 @@ def make_picker(config: dict, broker, notifier, reporter=None):
         congress_source = DisclosedCapitolSource(days=int(ccfg.get("lookback_days", 30)),
                                                  refresh_days=int(ccfg.get("refresh_days", 7)))
     insider_source = OpenInsiderSource(lookback_days=int(icfg["lookback_days"]), min_value=float(icfg["min_value"]))
-    return StockPicker(broker, pcfg, notifier, congress_source, insider_source, reporter)
+    return StockPicker(broker, pcfg, notifier, congress_source, insider_source, reporter, earnings)
 
 
 def build(config: dict, dry_run: bool):
@@ -88,14 +88,15 @@ def build(config: dict, dry_run: bool):
     broker, mode = make_broker(config, dry_run)
     notifier = Notifier(prefix=f"[{mode}{' DRY-RUN' if dry_run else ''}] ")
     ledger = Ledger(broker)
+    earnings = EarningsCalendar()
 
     strategies = []
     # The picker runs first, so the morning refresh is in place before the wheel trades.
     if config.get("picker", {}).get("enabled", True):
-        strategies.append(make_picker(config, broker, notifier, WeeklyReport(broker, notifier, ledger)))
+        strategies.append(make_picker(config, broker, notifier, WeeklyReport(broker, notifier, ledger), earnings))
     wheel_cfg = config.get("wheel", {})
     if wheel_cfg.get("enabled", True):
-        strategies.append(WheelStrategy(broker, wheel_cfg, notifier, EarningsCalendar(), ledger))
+        strategies.append(WheelStrategy(broker, wheel_cfg, notifier, earnings, ledger))
     return broker, notifier, strategies, mode
 
 

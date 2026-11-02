@@ -159,7 +159,8 @@ def _short(exc: Exception) -> str:
 class StockPicker:
     name = "picker"
 
-    def __init__(self, broker, config: dict, notifier, congress_source=None, insider_source=None, reporter=None):
+    def __init__(self, broker, config: dict, notifier, congress_source=None, insider_source=None, reporter=None,
+                 earnings=None):
         self.broker = broker
         self.cfg = {**DEFAULTS, **(config or {})}
         self.cfg["congress"] = {**CONGRESS_DEFAULTS, **(self.cfg.get("congress") or {})}
@@ -169,6 +170,7 @@ class StockPicker:
         self.congress_source = congress_source
         self.insider_source = insider_source
         self.reporter = reporter
+        self.earnings = earnings
 
     def due(self, now: datetime) -> bool:
         """Once a day, on the first top-of-the-hour run with yesterday's (or no) picks.
@@ -280,6 +282,13 @@ class StockPicker:
         self.broker.mark_picks_incomplete(bool(warnings))
         if warnings:
             warnings.append("Will retry every hour today")
+        if self.earnings is not None:
+            try:
+                problem = self.earnings.health_check()
+            except Exception as exc:
+                problem = f"Earnings calendar check failed ({_short(exc)})"
+            if problem:
+                notes.append("⚠️ " + problem + " — the wheel uses option prices as a backstop")
         self._summary(picks, records, warnings, today, len(disclosures), len(buys), notes)
         if self.reporter and today.weekday() == 0 and not retry:
             try:

@@ -27,6 +27,8 @@ class EarningsCalendar:
         self.timeout = timeout
         self._cache: dict[str, Optional[date]] = {}
         self._warned = False
+        self.failed: set[str] = set()   # symbols whose lookup errored (date unknown)
+        self.last_error: Optional[str] = None
 
     @property
     def available(self) -> bool:
@@ -45,7 +47,8 @@ class EarningsCalendar:
         try:
             resp = requests.get(
                 FINNHUB_URL,
-                params={"from": today.isoformat(), "to": (today + timedelta(days=self.days_ahead)).isoformat(),
+                params={"from": (today - timedelta(days=1)).isoformat(),
+                        "to": (today + timedelta(days=self.days_ahead)).isoformat(),
                         "symbol": symbol, "token": self.key},
                 timeout=self.timeout,
             )
@@ -56,10 +59,28 @@ class EarningsCalendar:
                     dates.append(datetime.strptime(row["date"], "%Y-%m-%d").date())
             result = min((d for d in dates if d >= today), default=None)
         except Exception as exc:
-            log.warning("Earnings lookup for %s failed: %s", symbol, exc)
+            msg = str(exc).replace(self.key, "***") if self.key else str(exc)  # never leak the key
+            log.warning("Earnings lookup for %s failed: %s", symbol, msg)
+            self.failed.add(symbol)
+            self.last_error = msg[:150]
             result = None
         self._cache[symbol] = result
         return result
+
+    def health_check(self) -> Optional[str]:
+        """None if the calendar works, else a short problem description for Telegram.
+
+        Apple reports every quarter, so a 120-day window must contain a date.
+        """
+        if not self.key:
+            return "FINNHUB_API_KEY is not set: the wheel can't see earnings dates"
+        probe = EarningsCalendar(self.key, days_ahead=120, timeout=self.timeout)
+        found = probe.next_earnings("AAPL")
+        if probe.failed:
+            return f"Earnings calendar error ({probe.last_error})"
+        if found is None:
+            return "Earnings calendar returned no dates (check FINNHUB_API_KEY)"
+        return None
 
 
 class StaticEarnings:
@@ -68,6 +89,10 @@ class StaticEarnings:
     def __init__(self, dates: Optional[dict[str, date]] = None):
         self.dates = dates or {}
         self.available = True
+        self.failed: set[str] = set()
+
+    def health_check(self):
+        return None
 
     def next_earnings(self, symbol: str, today: Optional[date] = None) -> Optional[date]:
         return self.dates.get(symbol)

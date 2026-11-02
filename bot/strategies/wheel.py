@@ -89,6 +89,9 @@ DEFAULTS = {
     "earnings_close_days": 2,
     "earnings_close_profit_pct": 0.25,
     "blackout_dates": [],
+    "skip_if_earnings_unknown": True,
+    "event_iv_ratio": 2.0,
+    "event_term_ratio": 1.2,
     # management
     "take_profit_pct": 0.50,
     "close_cheap_at": 0.05,
@@ -278,7 +281,7 @@ class WheelStrategy:
         if not self.cfg["avoid_earnings"]:
             return None
         e = self.earnings.next_earnings(sym, self.today)
-        return e if e and e > self.today else None
+        return e if e and e >= self.today else None  # today counts: reports often come after the close
 
     def _chain(self, sym, type_, min_dte, max_dte, **kw):
         return self.broker.option_chain(sym, type_, self.today + timedelta(days=min_dte),
@@ -592,6 +595,8 @@ class WheelStrategy:
     # ---- selling contracts -------------------------------------------------
     def _select(self, sym, type_, spot, tech, min_strike=None, max_strike=None):
         before = self._earnings_before(sym)
+        if sym in getattr(self.earnings, "failed", set()) and self.cfg["skip_if_earnings_unknown"]:
+            return None, "earnings date unknown (calendar lookup failed); not risking it", ""
         min_dte, max_dte = int(self.cfg["min_dte"]), int(self.cfg["max_dte"])
         note = ""
         if before and (before - self.today).days <= max_dte:
@@ -602,6 +607,10 @@ class WheelStrategy:
         chain = self._chain(sym, type_, min_dte, max_dte, strike_min=min_strike, strike_max=max_strike)
         iv = atm_iv(chain, spot)
         iv_ratio = iv / tech.realized_vol if iv and tech and tech.realized_vol else None
+        if type_ == "put":
+            risk = self._event_risk(sym, spot, iv, iv_ratio, chain)
+            if risk:
+                return None, risk, ""
         delta, reasons = target_delta(type_, self.cfg, tech, self.regime, iv_ratio)
         q, why = choose_contract(
             chain, type_, spot, self.today, delta, int(self.cfg["target_dte"]),
@@ -614,6 +623,28 @@ class WheelStrategy:
             return None, why, ""
         detail = f"target delta {delta:.2f}" + (f" ({'; '.join(reasons)})" if reasons else "") + note
         return q, "", detail
+
+    def _event_risk(self, sym, spot, iv, iv_ratio, chain) -> Optional[str]:
+        """Backstop for events the calendar may miss (earnings, FDA, lawsuits...).
+
+        Options price in a coming jump: implied vol far above realised vol, or
+        near-dated options much more expensive than later ones (an inverted
+        term structure). Either way, don't sell a new put.
+        """
+        limit = float(self.cfg["event_iv_ratio"] or 0)
+        if limit and iv_ratio and iv_ratio >= limit:
+            return f"options price in a big move (IV {iv_ratio:.1f}x realised), possible event; skipping"
+        inv = float(self.cfg["event_term_ratio"] or 0)
+        if inv and iv:
+            try:
+                near = self._chain(sym, "put", 1, int(self.cfg["min_dte"]) - 1)
+                near_iv = atm_iv(near, spot)
+            except Exception:
+                near_iv = None
+            if near_iv and near_iv >= iv * inv:
+                return (f"near-term options are {near_iv / iv:.1f}x pricier than later ones "
+                        "(an event is expected soon); skipping")
+        return None
 
     def _sell_put(self, sym, spot, tech, account, reserved) -> float:
         n = int(self.cfg["contracts_per_symbol"])

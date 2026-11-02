@@ -413,3 +413,72 @@ def test_no_put_when_not_enough_cash():
     b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
     make(b).run(NOW)
     assert b.submitted == []
+
+
+# ---- earnings & event backstops (after INTC, 29 Oct) --------------------------
+def test_earnings_today_after_the_close_blocks_new_put():
+    b = FakeBroker(prices={"INTC": 93.0})
+    b.add_chain("INTC", "put", TODAY, 29, [(84, -0.25, 2.86)])
+    make(b, symbols=["INTC"], earnings={"INTC": TODAY}).run(NOW)
+    assert b.submitted == []
+
+
+def test_failed_earnings_lookup_skips_the_stock():
+    from bot.events import StaticEarnings
+    b = FakeBroker(prices={"INTC": 93.0, "SOFI": 15.0})
+    b.add_chain("INTC", "put", TODAY, 29, [(84, -0.25, 2.86)])
+    b.add_chain("SOFI", "put", TODAY, 30, [(13, -0.3, 0.45)])
+    cal = StaticEarnings()
+    cal.failed = {"INTC"}
+    s = WheelStrategy(b, {"symbols": ["INTC", "SOFI"], "max_symbols": 1}, MemoryNotifier(), cal, Ledger(b))
+    s.run(NOW)
+    assert [occ.parse(o["symbol"]).underlying for o in b.submitted] == ["SOFI"]
+
+
+def test_implied_vol_far_above_realised_blocks_new_put():
+    b = FakeBroker(prices={"INTC": 93.0})
+    b.bars = {"INTC": uptrend(93), "SPY": uptrend(600)}          # calm stock: realised vol ~ low
+    from bot.market import technicals
+    hv = technicals(uptrend(93)).realized_vol
+    b.add_chain("INTC", "put", TODAY, 29, [(92, -0.45, 4.0), (84, -0.25, 2.86)], iv=hv * 2.5)
+    make(b, symbols=["INTC"], max_cash_pct=1.0).run(NOW)
+    assert b.submitted == []
+
+
+def test_inverted_term_structure_blocks_new_put():
+    b = FakeBroker(prices={"INTC": 93.0})
+    b.add_chain("INTC", "put", TODAY, 3, [(92, -0.45, 3.0)], iv=0.90)    # this week's options: very pricey
+    b.add_chain("INTC", "put", TODAY, 29, [(92, -0.45, 4.0), (84, -0.25, 2.86)], iv=0.50)
+    make(b, symbols=["INTC"], max_cash_pct=1.0).run(NOW)
+    assert b.submitted == []
+
+
+def test_normal_term_structure_still_trades():
+    b = FakeBroker(prices={"INTC": 93.0})
+    b.add_chain("INTC", "put", TODAY, 3, [(92, -0.45, 1.0)], iv=0.45)
+    b.add_chain("INTC", "put", TODAY, 29, [(92, -0.45, 4.0), (84, -0.25, 2.86)], iv=0.50)
+    make(b, symbols=["INTC"], max_cash_pct=1.0).run(NOW)
+    assert len(b.submitted) == 1
+
+
+def test_earnings_health_check_messages(monkeypatch):
+    import bot.events as ev
+
+    class R:
+        def __init__(self, data=None, status=200):
+            self.data, self.status = data, status
+
+        def raise_for_status(self):
+            if self.status >= 400:
+                raise RuntimeError(f"401 Client Error for url: https://finnhub.io/x?token=SECRETKEY")
+
+        def json(self):
+            return self.data
+    assert "not set" in ev.EarningsCalendar(api_key="").health_check()
+    monkeypatch.setattr(ev.requests, "get", lambda *a, **k: R(status=401))
+    msg = ev.EarningsCalendar(api_key="SECRETKEY").health_check()
+    assert "error" in msg and "SECRETKEY" not in msg
+    monkeypatch.setattr(ev.requests, "get", lambda *a, **k: R({"earningsCalendar": []}))
+    assert "no dates" in ev.EarningsCalendar(api_key="k").health_check()
+    monkeypatch.setattr(ev.requests, "get", lambda *a, **k: R({"earningsCalendar": [{"symbol": "AAPL", "date": "2027-01-28"}]}))
+    assert ev.EarningsCalendar(api_key="k").health_check() is None

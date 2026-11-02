@@ -98,6 +98,9 @@ wheel:
   earnings_close_profit_pct: 0.25  # ...if it has at least 25% profit
   ex_div_days: 2                 # check covered calls for early assignment 2 days before ex-dividend
   blackout_dates: []             # no NEW positions on these days, e.g. ["2026-12-09"] for a Fed decision
+  skip_if_earnings_unknown: true # no new put on a stock whose earnings lookup failed
+  event_iv_ratio: 2.0            # backstop: no new put if implied vol >= 2x realised vol (a big move is priced in)
+  event_term_ratio: 1.2          # backstop: no new put if near-term options are 1.2x pricier than later ones
 
   # --- managing open contracts ---
   take_profit_pct: 0.50          # buy back once 50% of the premium is captured

@@ -290,3 +290,14 @@ def test_partial_congress_data_is_flagged():
                     PartialSource([cong(f"P{i}", "AAA") for i in range(2)]), ListSource([]))
     s.run(NOW)
     assert b.incomplete and "Congress data incomplete" in s.notify.messages[0]
+
+
+def test_morning_message_flags_broken_earnings_calendar():
+    class BadCal:
+        def health_check(self):
+            return "Earnings calendar error (401)"
+    b = healthy_broker("AAA")
+    s = StockPicker(b, {"congress": {"use_track_records": False}}, MemoryNotifier(), ListSource([]),
+                    ListSource([ins("A", "AAA")]), earnings=BadCal())
+    s.run(NOW)
+    assert "Earnings calendar error (401)" in s.notify.messages[0] and not b.incomplete
