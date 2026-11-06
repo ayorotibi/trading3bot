@@ -67,6 +67,7 @@ DEFAULTS = {
     "max_share_price": None,
     "contracts_per_symbol": 1,
     "max_cash_pct": 0.50,
+    "max_position_pct": None,
     # contract choice
     "target_dte": 30,
     "min_dte": 21,
@@ -95,6 +96,7 @@ DEFAULTS = {
     # management
     "take_profit_pct": 0.50,
     "stop_loss_multiple": 3.0,
+    "stop_loss_hard_multiple": 5.0,
     "stop_loss_exempt": [],
     "close_cheap_at": 0.05,
     "manage_dte": 7,
@@ -365,19 +367,28 @@ class WheelStrategy:
         if tp and ask > 0 and ask <= entry * (1 - tp):
             self._buy_back(p.symbol, qty, ask, f"✅ Take profit on {label}: {profit_pct:.0%} of the premium captured")
             return
-        # Stop-loss on puts whose stock we no longer want
+        # Stop-loss on puts:
+        #   loss >= stop_loss_multiple x premium, unless the stock is a pick AND in a clear uptrend
+        #   loss >= stop_loss_hard_multiple x premium, always
         stop = float(self.cfg["stop_loss_multiple"] or 0)
-        if (stop and info.type == "put" and entry > 0 and mark >= entry * (1 + stop)
-                and p.symbol not in set(self.cfg["stop_loss_exempt"] or [])):
+        hard = float(self.cfg["stop_loss_hard_multiple"] or 0)
+        exempt = p.symbol in set(self.cfg["stop_loss_exempt"] or [])
+        if stop and info.type == "put" and entry > 0 and mark >= entry * (1 + stop) and not exempt:
+            loss = (mark - entry) * 100 * qty
+            premium = entry * 100 * qty
             tech_s = self.tech(sym)
-            unwanted = sym not in self.wanted or (tech_s is not None and tech_s.trend == "down")
-            if unwanted:
-                loss = (mark - entry) * 100 * qty
-                self._buy_back(p.symbol, qty, ask, f"🛑 Stop-loss on {label}: loss ~${loss:,.0f} is over "
-                                                    f"{stop:g}x the ${entry * 100 * qty:,.0f} premium and {sym} "
-                                                    "is no longer a pick")
+            strong = sym in self.wanted and tech_s is not None and tech_s.trend == "up"
+            if hard and mark >= entry * (1 + hard):
+                why = f"over the hard limit of {hard:g}x the ${premium:,.0f} premium"
+            elif not strong:
+                reason = "is no longer a pick" if sym not in self.wanted else f"is not in an uptrend"
+                why = f"over {stop:g}x the ${premium:,.0f} premium and {sym} {reason}"
+            else:
+                why = None
+                log.info("Wheel: %s past %gx stop but %s is a pick in an uptrend; holding", label, stop, sym)
+            if why:
+                self._buy_back(p.symbol, qty, ask, f"🛑 Stop-loss on {label}: loss ~${loss:,.0f} is {why}")
                 return
-            log.info("Wheel: %s past the stop-loss level but %s is still wanted; holding", label, sym)
         # Nearly worthless
         cheap = float(self.cfg["close_cheap_at"] or 0)
         if cheap and 0 < ask <= cheap:
@@ -578,6 +589,8 @@ class WheelStrategy:
             return
         cands, source = self.candidates(picks)
         per_symbol = account.equity * float(self.cfg["max_cash_pct"]) / max(1, int(self.cfg["max_symbols"]))
+        if self.cfg.get("max_position_pct"):  # optional fixed cap per stock instead of an equal slice
+            per_symbol = account.equity * float(self.cfg["max_position_pct"])
         n = int(self.cfg["contracts_per_symbol"])
         started = []
         working = {occ.parse(o.symbol).underlying if occ.is_option_symbol(o.symbol) else o.symbol for o in orders}

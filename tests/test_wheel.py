@@ -502,9 +502,49 @@ def test_stop_loss_closes_put_on_unwanted_stock():
     assert "Stop-loss" in s.notify.messages[0]
 
 
-def test_stop_loss_holds_if_stock_still_wanted():
-    b, _, _ = _losing_put(picks=["INTC"])
+def test_stop_loss_holds_for_a_pick_in_an_uptrend_below_the_hard_limit():
+    b = FakeBroker(prices={"XLE": 64.0})
+    b.picks = ["XLE"]
+    b.bars = {"XLE": uptrend(64), "SPY": uptrend(600)}
+    put = put_sym("XLE", 21, 66)
+    b.pos.append(Position(put, -1, 0.67, 3.10, True))
+    b.quotes[put] = (3.00, 3.20)          # ~3.6x premium, under the 5x hard stop
+    make(b, symbols=[]).run(NOW)
     assert b.submitted == []
+
+
+def test_weak_trend_no_longer_protects_a_pick():
+    b = FakeBroker(prices={"XLE": 64.0})
+    b.picks = ["XLE"]
+    b.bars = {"XLE": weak(64), "SPY": uptrend(600)}
+    put = put_sym("XLE", 21, 66)
+    b.pos.append(Position(put, -1, 0.67, 3.10, True))
+    b.quotes[put] = (3.00, 3.20)
+    s = make(b, symbols=[])
+    s.run(NOW)
+    assert [o["symbol"] for o in b.submitted] == [put] and "not in an uptrend" in s.notify.messages[0]
+
+
+def test_hard_stop_at_5x_even_for_a_strong_pick():
+    """6 Nov: XLE put at ~8x premium was held because XLE was still a pick."""
+    b = FakeBroker(prices={"XLE": 60.0})
+    b.picks = ["XLE"]
+    b.bars = {"XLE": uptrend(60), "SPY": uptrend(600)}
+    put = put_sym("XLE", 21, 66)
+    b.pos.append(Position(put, -1, 0.67, 6.15, True))
+    b.quotes[put] = (6.05, 6.25)
+    s = make(b, symbols=[])
+    s.run(NOW)
+    assert [o["symbol"] for o in b.submitted] == [put] and "hard limit of 5x" in s.notify.messages[0]
+
+
+def test_max_position_pct_caps_each_stock():
+    b = FakeBroker(prices={"AAA": 80.0, "BBB": 60.0}, equity=46_500, cash=46_500)
+    b.picks = ["AAA", "BBB"]
+    b.add_chain("AAA", "put", TODAY, 30, [(75, -0.3, 1.80)])
+    b.add_chain("BBB", "put", TODAY, 30, [(57, -0.3, 1.40)])
+    make(b, max_position_pct=0.15).run(NOW)   # 15% = $6,975: AAA (~$8,000) skipped, BBB (~$6,000) fits
+    assert [occ.parse(o["symbol"]).underlying for o in b.submitted] == ["BBB"]
 
 
 def test_stop_loss_exempt_contract_left_alone():
